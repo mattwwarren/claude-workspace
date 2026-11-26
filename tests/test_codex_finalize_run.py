@@ -624,11 +624,22 @@ def test_a_reused_conflicting_pr_is_not_armed(
     with patch(
         "cw.stage_verification.impl_feedback.probe_default_merge", return_value=conflict
     ):
-        result = h.run()
+        result, payload = _run_handing(h)
     _assert_block(result, "merge_conflict_post_push", stage="stage5_post_create")
     assert result.blocker is not None
     assert result.blocker.retry_eligible is True
     assert "clash.py" in result.blocker.details
+    assert "cw does not resolve a conflict found before the push" in (
+        result.blocker.details
+    )
+    assert "no merge attempted" not in result.blocker.details
+    assert "not attempted" not in result.blocker.details
+    assert payload["pr_info"] == {
+        "number": PR_NUMBER,
+        "url": PR_URL,
+        "auto_merge": False,
+        "base": "main",
+    }
     assert h.arm.calls() == []
 
 
@@ -711,6 +722,12 @@ def test_the_detector_guard_looks_up_the_recorded_branch_never_the_checkout(
     assert listing[4] == "dev/custom"
     (call,) = h.created()
     assert call.argv[call.argv.index("--head") + 1] == "dev/custom"
+    # A recorded branch is an adopted row: `ready` runs just before the arm.
+    assert [c[0] for c in h.arm.calls()] == [
+        "check-automerge-allowed",
+        "ready",
+        "arm-automerge",
+    ]
 
 
 def test_the_reuse_path_re_checks_the_fence_and_parks_before_any_gate(
@@ -1064,13 +1081,14 @@ def test_the_default_branch_conflict_blocks_before_the_push(
     with patch(
         "cw.stage_verification.impl_feedback.probe_default_merge", return_value=conflict
     ):
-        result = h.run()
+        result, payload = _run_handing(h)
     _assert_block(result, "merge_conflict_post_push", stage="stage4b_pr_create")
     assert result.blocker is not None
     assert result.blocker.retry_eligible is False
     assert "clash.py" in result.blocker.details
     assert h.origin_tip() == tip
     assert h.runner.calls == []
+    assert "pr_info" not in payload
 
 
 def test_an_unavailable_probe_is_friction_and_the_run_continues(
@@ -1194,10 +1212,20 @@ def test_a_conflicting_pr_after_create_blocks_before_the_re_fence(
         "mergeable,mergeStateStatus",
         stdout=json.dumps({"mergeable": "CONFLICTING", "mergeStateStatus": "DIRTY"}),
     )
-    result = h.run()
+    result, payload = _run_handing(h)
     _assert_block(result, "merge_conflict_post_push", stage="stage5_post_create")
     assert result.blocker is not None
     assert result.blocker.retry_eligible is True
+    # The one merge of origin/main is a no-op here, so the PR is still DIRTY.
+    assert result.blocker.details.endswith(
+        "; still not mergeable after one merge of origin/main"
+    )
+    assert payload["pr_info"] == {
+        "number": PR_NUMBER,
+        "url": PR_URL,
+        "auto_merge": False,
+        "base": "main",
+    }
     assert h.order.count("run_approval_fence") == 1
     assert h.arm.calls() == []
 

@@ -1776,8 +1776,19 @@ if sys.argv[1] == "ci-hold" and sys.argv[2:3] in (["set"], ["status"], ["release
     sys.stdout.write({hold_stdout!r}[sys.argv[2]])
     sys.stderr.write({hold_stderr!r})
     sys.exit({hold_exit})
+if sys.argv[1] == "ready":
+    sys.stdout.write({ready_stdout!r}.replace("<PR_NUMBER>", sys.argv[2]))
+    sys.exit({ready_exit})
 sys.exit(2)
 """
+
+#: ``ready``'s default reply: the script's ``ReadyResult`` for an already-ready
+#: PR (``status``, ``flipped``, ``gh_exit_code``, ``gh_stderr``, ``detail``).
+_READY_STUB_STDOUT = (
+    '{"pr_number": <PR_NUMBER>, "status": "already_ready", "flipped": false, '
+    '"gh_exit_code": null, "gh_stderr": "", '
+    '"detail": "isDraft read back false -- no gh pr ready call"}'
+)
 
 # What the stub's ``ci-hold`` answers on stdout when it exits 0, per action.
 _HOLD_STUB_STDOUT = {
@@ -1798,6 +1809,8 @@ def stub_prep_pr_finalize(
     arm_stderr: str = "",
     hold_exit: int = 0,
     hold_stderr: str = "",
+    ready_exit: int = 0,
+    ready_stdout: str = _READY_STUB_STDOUT,
 ) -> ScriptStub:
     """A fake ``prep_pr_finalize.py`` at ``<root>/.claude/scripts/``.
 
@@ -1808,7 +1821,9 @@ def stub_prep_pr_finalize(
     is set). ``ci-hold set|status|release`` exit *hold_exit* and write
     *hold_stderr*; on exit 0 they print a ``none``-state JSON reply (the script
     text carries the literal ``ci-hold``, which the codex release probe looks
-    for). Any other subcommand exits 2. Every call is logged; read it with
+    for). ``ready <n>`` exits *ready_exit* and prints *ready_stdout* (default:
+    the ``ReadyResult`` of an already-ready PR; ``<PR_NUMBER>`` is replaced by
+    *n*). Any other subcommand exits 2. Every call is logged; read it with
     :meth:`ScriptStub.calls`.
     """
     scripts = root / ".claude" / "scripts"
@@ -1830,6 +1845,8 @@ def stub_prep_pr_finalize(
             else dict.fromkeys(_HOLD_STUB_STDOUT, ""),
             hold_stderr=hold_stderr,
             hold_exit=hold_exit,
+            ready_stdout=ready_stdout,
+            ready_exit=ready_exit,
         ),
         encoding="utf-8",
     )
