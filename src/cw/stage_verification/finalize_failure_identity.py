@@ -6,9 +6,12 @@ of failures it reports, and says whether every failure of the branch run also
 appears in the base run. Pure functions only: no subprocess, no ``cw.codex_*``
 import.
 
-* ``pytest*``: the multiset of ``FAILED`` / ``ERROR`` short-summary node ids;
-  their count must equal the final summary's ``failed`` plus ``error`` counts.
-  A coverage failure, ``stopping after`` or ``Interrupted`` has no identity.
+* ``pytest*``: the multiset of ``FAILED`` / ``ERROR`` short-summary lines (node
+  id and the message after `` - ``); their count must equal the final summary's
+  ``failed`` plus ``error`` counts. A coverage failure, ``stopping after`` or
+  ``Interrupted`` has no identity, and neither does a line with no message or
+  one pytest cut before the exception type was whole. A message cut inside a
+  tree's own path differs between the two trees, so it does not match.
 * ``mypy*``: ``(path, message, code)`` without line numbers; the count must
   equal ``Found N errors``. ``errors prevented further checking`` has none.
 * ``ruff*``: ``(code, path, message)`` without line numbers (full or concise
@@ -52,7 +55,13 @@ _DURATION: Final = re.compile(
     r"(?<![\w.])(?:\d+m ?)?\d+(?:\.\d+)?(?:ns|us|µs|ms|s)(?!\w)"
 )
 
-_PYTEST_ENTRY: Final = re.compile(r"^(?P<kind>FAILED|ERROR) (?P<node>\S+)(?: - .*)?$")
+_PYTEST_ENTRY: Final = re.compile(
+    r"^(?P<kind>FAILED|ERROR) (?P<node>\S+)(?: - (?P<message>.*))?$"
+)
+#: pytest ends a message it cut to the terminal width with this.
+_PYTEST_CUT: Final = "..."
+#: What a cut message must still start with: ``assert``, or ``SomeError:``.
+_PYTEST_WHOLE_TYPE: Final = re.compile(r"assert(?:\s|$)|[A-Za-z_][\w.]*:")
 _PYTEST_FINAL: Final = re.compile(r"^=*\s*\d+ \w.* in \d+(?:\.\d+)?s\b")
 _PYTEST_COUNT: Final = re.compile(r"(\d+) (failed|errors?)\b")
 _PYTEST_NO_IDENTITY: Final = (
@@ -103,6 +112,18 @@ def normalise(text: str, roots: Sequence[str]) -> str:
     return _SCRATCH.sub(_SCRATCH_MARK, out)
 
 
+def _pytest_item(entry: re.Match[str]) -> Item | None:
+    """One summary line's item; ``None`` when it does not show what failed."""
+    message = entry.group("message")
+    if message is None:
+        return None
+    if message.endswith(_PYTEST_CUT):
+        shown = message.removesuffix(_PYTEST_CUT)
+        if _PYTEST_WHOLE_TYPE.match(shown) is None:
+            return None
+    return (entry.group("kind"), entry.group("node"), message)
+
+
 def _pytest_items(text: str) -> tuple[Item, ...] | None:
     if any(marker in text for marker in _PYTEST_NO_IDENTITY):
         return None
@@ -111,7 +132,10 @@ def _pytest_items(text: str) -> tuple[Item, ...] | None:
     for line in text.splitlines():
         entry = _PYTEST_ENTRY.match(line)
         if entry is not None:
-            items.append((entry.group("kind"), entry.group("node")))
+            item = _pytest_item(entry)
+            if item is None:
+                return None
+            items.append(item)
         elif _PYTEST_FINAL.match(line):
             final = line
     if final is None:

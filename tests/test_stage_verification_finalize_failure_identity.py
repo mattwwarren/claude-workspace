@@ -63,22 +63,65 @@ def test_the_same_failures_match(gate: str, text: str) -> None:
     assert _match(gate, text, text)
 
 
-def test_pytest_identity_is_the_summary_node_ids() -> None:
+def test_pytest_identity_is_the_summary_node_ids_and_messages() -> None:
     ident = fid.failure_identity("pytest", _PYTEST, roots=())
     assert ident is not None
     assert sorted(ident.items) == [
-        ("ERROR", "tests/test_fixture_err.py::test_uses_boom"),
-        ("FAILED", "tests/test_calc.py::TestGroup::test_inside"),
-        ("FAILED", "tests/test_calc.py::test_add_type"),
-        ("FAILED", "tests/test_calc.py::test_add_wrong"),
+        (
+            "ERROR",
+            "tests/test_fixture_err.py::test_uses_boom",
+            "RuntimeError: fixture setup...",
+        ),
+        ("FAILED", "tests/test_calc.py::TestGroup::test_inside", "assert 0 == 1"),
+        (
+            "FAILED",
+            "tests/test_calc.py::test_add_type",
+            "TypeError: can only concatenate st...",
+        ),
+        ("FAILED", "tests/test_calc.py::test_add_wrong", "assert 4 == 5"),
     ]
+
+
+def test_the_same_node_failing_differently_on_base_does_not_match() -> None:
+    # test_value: ``assert 1 == 2`` on the branch, ``KeyError`` on the base.
+    assert not _match(
+        "pytest",
+        _read("pytest_message_branch.txt"),
+        _read("pytest_message_other_exception.txt"),
+    )
+
+
+def test_the_same_failure_from_two_roots_matches() -> None:
+    mine = fid.failure_identity(
+        "pytest", _read("pytest_message_root_a.txt"), roots=("/redacted/repo",)
+    )
+    theirs = fid.failure_identity(
+        "pytest",
+        _read("pytest_message_root_b.txt"),
+        roots=("/redacted/scratch/tree",),
+    )
+    assert mine is not None
+    assert theirs is not None
+    assert any("<root>/data/missing.txt" in item[2] for item in mine.items)
+    assert fid.identity_matches(mine, theirs)
+
+
+@pytest.mark.parametrize(
+    "capture", ["pytest_message_type_cut.txt", "pytest_message_absent.txt"]
+)
+def test_a_summary_line_without_a_whole_exception_type_has_no_identity(
+    capture: str,
+) -> None:
+    assert fid.failure_identity("pytest", _read(capture), roots=()) is None
 
 
 def test_a_met_coverage_threshold_keeps_the_identity() -> None:
     assert "Required test coverage of 50% reached" in _COVERAGE_MET
     ident = fid.failure_identity("pytest", _COVERAGE_MET, roots=())
     assert ident is not None
-    assert ident.items == (("FAILED", "tests/test_calc.py::test_add_wrong"),)
+    assert ident.items == (
+        ("FAILED", "tests/test_calc.py::test_add_wrong", "assert 4 == 5"),
+    )
 
 
 @pytest.mark.parametrize("marker", ["FAIL Required test coverage", "Coverage failure"])
