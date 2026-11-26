@@ -1949,6 +1949,7 @@ def test_codex_finalize_cell_counts() -> None:
     for element_id, element in _manifest().elements.items():
         if element_id.split(".")[0] in {"finalize", "prep-pr", "ship-it"}:
             cell = element.cells[CODEX_BACKEND]
+            assert not isinstance(cell, str), element_id
             counts[cell.disposition] = counts.get(cell.disposition, 0) + 1
     assert counts == {
         "implemented": 33,
@@ -2026,7 +2027,7 @@ _C1_RESUME_CELLS = {
 def test_the_resume_parity_cells_point_at_their_code(element_id: str) -> None:
     disposition, path, symbol = _C1_RESUME_CELLS[element_id]
     cell = _manifest().elements[element_id].cells[CODEX_BACKEND]
-    assert not isinstance(cell, str)
+    assert isinstance(cell, (ImplementedDisposition, FailsClosedDisposition))
     assert cell.disposition == disposition
     assert isinstance(cell.ref, CodeRef)
     assert (cell.ref.path, cell.ref.symbol) == (path, symbol)
@@ -2079,7 +2080,7 @@ def test_the_approval_and_origin_sync_cells_point_at_their_code(
 ) -> None:
     disposition, path, symbol = _C1_APPROVAL_CELLS[element_id]
     cell = _manifest().elements[element_id].cells[CODEX_BACKEND]
-    assert not isinstance(cell, str)
+    assert isinstance(cell, (ImplementedDisposition, FailsClosedDisposition))
     assert cell.disposition == disposition
     assert isinstance(cell.ref, CodeRef)
     assert (cell.ref.path, cell.ref.symbol) == (path, symbol)
@@ -2403,13 +2404,14 @@ def test_base_branch_elements_dispositions() -> None:
     elements = _manifest().elements
     for element_id in _BASE_BRANCH_ELEMENTS:
         cells = elements[element_id].cells
-        assert cells["claude-native"].disposition == "implemented", element_id
+        native = cells["claude-native"]
+        assert isinstance(native, ImplementedDisposition), element_id
         codex = cells["codex"]
-        assert codex.disposition == "implemented", element_id
+        assert isinstance(codex, ImplementedDisposition), element_id
         assert isinstance(codex.ref, CodeRef), element_id
         for backend in ("opencode", "local"):
             cell = cells[backend]
-            assert cell.disposition == "fails-closed", (element_id, backend)
+            assert isinstance(cell, FailsClosedDisposition), (element_id, backend)
             assert cell.ref == _PREFLIGHT_REF, (element_id, backend)
             assert not cell.guard_pending, (element_id, backend)
 

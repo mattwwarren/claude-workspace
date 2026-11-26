@@ -10,6 +10,8 @@ sandboxed git repos; mypy output comes from real captures under
 from __future__ import annotations
 
 import logging
+import shutil
+import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -341,7 +343,7 @@ def test_gate_worktree_add_failure_raises_and_leaves_nothing(
     root = tmp_path / "root"
     root.mkdir()
     with (
-        pytest.raises(gate.subprocess.CalledProcessError),
+        pytest.raises(subprocess.CalledProcessError),
         gate.gate_worktree(repo, "0" * 40, root=str(root), ticket="T-1"),
     ):
         pass
@@ -356,7 +358,7 @@ def test_a_leftover_directory_logs_a_warning(
 ) -> None:
     root = tmp_path / "root"
     root.mkdir()
-    monkeypatch.setattr(gate.shutil, "rmtree", lambda *_a, **_k: None)
+    monkeypatch.setattr(shutil, "rmtree", lambda *_a, **_k: None)
     caplog.set_level(logging.WARNING, logger=gate.__name__)
     with gate.gate_output_dir(str(root), "T-9") as out:
         pass

@@ -25,6 +25,8 @@ from cw.contract_manifest import (
     TAG_SHAPED,
     CodeRef,
     DeferredDisposition,
+    FailsClosedDisposition,
+    ImplementedDisposition,
     Manifest,
     NeutralBlock,
     NotApplicableDisposition,
@@ -156,7 +158,7 @@ def _render(
     )
 
 
-def _manifest_variant(**cells: dict[str, object]) -> Manifest:
+def _manifest_variant(**cells: Mapping[str, object]) -> Manifest:
     """A copy of the packaged manifest with the codex cell of each id replaced.
 
     A cell of ``{}`` removes the element.
@@ -535,7 +537,7 @@ def test_every_needed_id_is_rendered_or_deferred(stage: str) -> None:
         assert cell.disposition in {"implemented", "deferred", "fails-closed"}, (
             element_id
         )
-        if cell.disposition in {"implemented", "fails-closed"}:
+        if isinstance(cell, (ImplementedDisposition, FailsClosedDisposition)):
             assert isinstance(cell.ref, CodeRef), element_id
 
 

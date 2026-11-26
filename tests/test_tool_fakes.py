@@ -1115,23 +1115,28 @@ class TestFinalizeFakes:
             {
                 "review": GhReply(0, "generic"),
                 "review check-approval": GhReply(1, "out", "err"),
+                "dev-queue adopted-prs": GhReply(0, ""),
             },
         )
         done = gates_module.run_cw_cli(
             tmp_path, ["review", "check-approval", "--tier", "large"]
         )
-        generic = merge_gate_module.run_cw_cli(tmp_path, ["review", "other"])
+        generic = gates_module.run_cw_cli(tmp_path, ["review", "other"])
+        # The merge gate's own import of run_cw_cli is replaced too.
+        adopted = merge_gate_module._adopted_heads(tmp_path, "c")
 
         assert isinstance(fake, FakeCwCli)
         assert done is not None
         assert (done.returncode, done.stdout, done.stderr) == (1, "out", "err")
         assert generic is not None
         assert generic.stdout == "generic"
+        assert adopted == []
         assert fake.calls == [
             ["review", "check-approval", "--tier", "large"],
             ["review", "other"],
+            ["dev-queue", "adopted-prs", "-c", "c"],
         ]
-        assert fake.cwds == [tmp_path, tmp_path]
+        assert fake.cwds == [tmp_path, tmp_path, tmp_path]
 
     def test_stub_cw_cli_none_is_a_cli_that_could_not_finish(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1187,7 +1192,8 @@ class TestSharedGhFixture:
 
     def test_shared_gh_installs_a_fake_gh_cli(self, gh: FakeGhCli) -> None:
         assert isinstance(gh, FakeGhCli)
-        assert subprocess.run is gh
+        installed: object = subprocess.run
+        assert installed is gh
 
     class TestLocalOverride:
         @pytest.fixture
