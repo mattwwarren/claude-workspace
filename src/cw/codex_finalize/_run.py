@@ -14,7 +14,8 @@ returns the claimed row to PENDING. The ordered flow:
 4. Create path: the merge gate, the quality gates, the default-branch probe,
    the ahead-push, the one read-only turn, ``gh pr create`` (its body already
    carries the adjudication copied from the deferred-findings artifact and the
-   override) and the bind. Reuse path: the quality gates and, only when
+   override, and leads with ``Closes #<n>`` for a GitHub-numeric ticket id) and
+   the bind. Reuse path: the quality gates and, only when
    overridden, the turn that writes the override section.
 5. Mergeability, then Step 4d (``run_review_artifacts``: the review-debt
    re-file, the UI-evidence gate and the one PR-body write of adjudication,
@@ -148,6 +149,7 @@ from cw.stage_verification.finalize_result import (
     finalize_merge_gate_blocked,
     finalize_shipped,
     parse_finalize_turn,
+    with_closes_trailer,
 )
 from cw.stage_verification.finalize_review_artifacts import (
     PrTarget,
@@ -379,6 +381,7 @@ def _pr_body(doc: FinalizeTurnDocument, state: _State, worktree: Path) -> str:
         body = apply_body_section(body, section, heading=REVIEW_ADJUDICATION_HEADING)
     if state.override_section is not None:
         body = apply_override_section(body, state.override_section)
+    body = with_closes_trailer(body, state.facts.ticket_id)
     return body.rstrip() + "\n"
 
 

@@ -28,6 +28,7 @@ from cw.codex_review import _CODEX_FINALIZE_BLOCKED_NEXT_ACTIONS
 from cw.codex_runner import CodexRunResult
 from cw.config import load_state
 from cw.dev_queue import load_dev_queue
+from cw.dev_queue.dispositions import _extract_pr_url
 from cw.events import read_events
 from cw.local_runner import UNEXPECTED_ERROR
 from cw.merge_probe import MergeProbe
@@ -388,6 +389,17 @@ def _assert_nothing_created(h: Harness, tip_before: str | None = None) -> None:
 # --- AC1: the create path ------------------------------------------------------
 
 
+def test_a_shipped_result_carries_what_the_red_pr_sweep_selects_on(
+    harness: Callable[..., Harness],
+) -> None:
+    """The shipped result carries the PR URL the red-PR sweep reads (#3544)."""
+    h = harness()
+    h.turn(finalize_document(pr_title=TITLE, pr_body=BODY))
+    result = h.run()
+    assert result.status == "shipped"
+    assert _extract_pr_url(h.raw()) == PR_URL
+
+
 def test_create_path_creates_arms_through_the_script_and_ships(
     harness: Callable[..., Harness],
 ) -> None:
@@ -419,7 +431,7 @@ def test_create_path_creates_arms_through_the_script_and_ships(
         call.argv[-1],
     ]
     assert "--draft" not in call.argv
-    assert call.body_file == BODY
+    assert call.body_file == f"Closes #{TICKET}\n\n{BODY}"
     assert [c[0] for c in h.arm.calls()] == ["check-automerge-allowed", "arm-automerge"]
     assert h.arm.calls()[1][1:] == [
         str(PR_NUMBER),
