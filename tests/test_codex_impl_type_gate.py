@@ -536,8 +536,25 @@ def test_a_turn_with_no_python_files_runs_no_ruff_or_mypy(
 
     assert result.status == "stage_complete", _details(result)
     assert _gate4_calls(uv.calls) == []
-    assert SKIPPED_NO_GATE_FRICTION not in result.friction_highlights
     _assert_no_gate_dirs(gate_root, h)
+
+
+def test_no_declared_tool_and_no_python_file_adds_no_skip_friction(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    gate_root: Path,
+) -> None:
+    notes = "docs/notes.md"
+    h = harness(plan=PLAN.replace(WIDGET, notes))
+    uv = _uv(tmp_path, monkeypatch)
+    h.turn({notes: "notes\n"})
+
+    result = h.run()
+
+    assert result.status == "stage_complete", _details(result)
+    assert SKIPPED_NO_GATE_FRICTION not in result.friction_highlights
+    assert uv.calls == []
 
 
 @pytest.mark.parametrize(
