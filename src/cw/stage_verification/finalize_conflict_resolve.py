@@ -15,8 +15,9 @@ handled like a failed one.
 
 Every refusal returns the caller's original park with a note saying what was
 tried. A failed gate resets the merge away only when this run made it
-(``HEAD^1`` is the pre-merge sha on the expected branch); otherwise the note
-says the merge is left local and what to run by hand. :class:`ResolveOutcome`
+(``HEAD`` is that merge commit and ``HEAD^1`` the pre-merge sha on the
+expected branch); otherwise the note says the merge is left local and what to
+run by hand. :class:`ResolveOutcome`
 ``head`` is the merge sha only once it is pushed and verified on origin.
 
 Imports no ``cw.codex_*`` module (the stage-verification ratchet).
@@ -391,13 +392,20 @@ def _commit(
 # -- gates and the revert ------------------------------------------------------
 
 
-def _revert(attempt: _Attempt) -> str | None:
-    """Reset the merge this run made; ``None`` on success, else why not."""
+def _revert(attempt: _Attempt, merge_sha: str) -> str | None:
+    """Reset the merge this run made; ``None`` on success, else why not.
+
+    *merge_sha* is that merge. Any other ``HEAD``, a different commit on the
+    same first parent included, is left alone.
+    """
     if check_branch(attempt.worktree, attempt.branch) is not None:
         return f"the worktree no longer has {attempt.branch!r} checked out"
     parent = _git(attempt.worktree, ["rev-parse", "HEAD^1"])
     if parent.returncode != 0 or parent.stdout.strip() != attempt.pre_merge:
         return f"HEAD^1 is not the pre-merge commit {attempt.pre_merge}"
+    if not merge_sha or _local_head(attempt.worktree) != merge_sha:
+        shown = merge_sha or "(unreadable)"
+        return f"HEAD is not the merge commit {shown} this run made"
     reset = _git(attempt.worktree, ["reset", "--hard", attempt.pre_merge])
     if reset.returncode != 0:
         return f"git reset --hard {attempt.pre_merge} failed: {_output(reset)}"
@@ -444,7 +452,7 @@ def _gate_park(
         details = block.details if block is not None else "no reason recorded"
         what = f"the quality gates could not run: {_capped(details)}"
     try:
-        why = _revert(attempt)
+        why = _revert(attempt, merge_sha)
     except _GIT_ERRORS as exc:
         why = f"the revert did not finish: {redacted_tail(str(exc))}"
     note = f"semantic auto-resolve resolved conflicts ({categories}) but {what}"

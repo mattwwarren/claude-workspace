@@ -652,6 +652,32 @@ def test_a_gate_that_moved_head_is_not_reverted(repo: Repo) -> None:
     assert "commits above the merge would be lost" in block.details
 
 
+def test_a_commit_that_replaced_the_merge_is_not_reset_away(repo: Repo) -> None:
+    install_real_guard_script(resolve.CLASSIFIER_SCRIPT_NAME)
+    repo.ours_and_theirs(_DOC, "ours\n", "theirs\n")
+    pre = repo.head()
+    merged: list[str] = []
+    others: list[str] = []
+
+    def _replacing_gate() -> FinalizeGateRun:
+        merged.append(repo.head())
+        git_in(repo.worktree, "reset", "-q", "--hard", pre)
+        commit_tracked_file(repo.worktree, "not-this-run.py")
+        others.append(repo.head())
+        return _red()
+
+    outcome = _resolve(repo, run_gates=_replacing_gate)
+    assert repo.head() == others[0]
+    block = outcome.block
+    assert block is not None
+    assert block.retry_eligible is False
+    assert "; reverted" not in block.details
+    assert (
+        f"NOT reverted (HEAD is not the merge commit {merged[0]} this run made)"
+        in block.details
+    )
+
+
 def test_a_failed_reset_is_not_reverted(
     repo: Repo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

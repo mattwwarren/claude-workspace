@@ -5021,8 +5021,8 @@ Everything below is cw-run Python; no codex turn gets write access.
   `Auto-Resolved-By: classify_merge_conflict.py (#1850)` trailer, runs the
   quality gates on the `resolve` path (no CI consult, no classifier), pushes
   plainly and re-checks once. A red gate resets to the pre-merge sha only when
-  this run made the merge (`HEAD^1` is the pre-merge sha on the row's branch)
-  and says `; reverted`; otherwise, or when the reset fails, the park says
+  this run made the merge (`HEAD` is still that merge commit and `HEAD^1` the
+  pre-merge sha, on the row's branch) and says `; reverted`; otherwise, or when the reset fails, the park says
   `NOT reverted`, names the merge sha left in the worktree (and the current
   HEAD when it differs) and the `git -C <worktree> reset --hard <pre-merge>`
   to run by hand once the row's branch is confirmed checked out, and is not
