@@ -102,9 +102,10 @@ _SEGMENT_SPLIT: Final = re.compile(r"&&|\|\||[;|\n]")
 _WRAPPERS: Final = frozenset({"make", "pre-commit"})
 # The ``uv run`` options that select the environment; cw repeats these.
 _UV_FLAGS: Final = frozenset({"--all-extras", "--all-groups"})
-_UV_VALUE_OPTIONS: Final = frozenset(
-    {"--extra", "--group", "--with", "--python", "--env-file"}
-)
+_UV_VALUE_OPTIONS: Final = frozenset({"--extra", "--group", "--with", "--python"})
+# Values that can name a path: a relative one may not exist in the gate worktree,
+# which holds only tracked files.
+_UV_PATH_VALUE_OPTIONS: Final = frozenset({"--with", "--python"})
 _DIRECTORY_CHANGES: Final = frozenset({"cd", "pushd"})
 _ASSIGNMENT: Final = re.compile(r"^[A-Za-z_]\w*\+?=")
 _SHELL_EXPANSION: Final = re.compile(r"[$`]")
@@ -207,12 +208,19 @@ def _uv_run_at(tokens: Sequence[str], tool: str) -> int | None:
     return None
 
 
+def _repeatable_value(name: str, value: str) -> bool:
+    """Whether cw can repeat option *name*'s *value* in the gate worktree."""
+    if not value or _SHELL_EXPANSION.search(value):
+        return False
+    return not (name in _UV_PATH_VALUE_OPTIONS and value.startswith("."))
+
+
 def _env_options(args: Sequence[str]) -> tuple[str, ...] | None:
     """The environment options leading ``uv run``'s *args*.
 
     ``None`` when an option is not one cw repeats (``--directory``,
-    ``--project``, ``--package`` or anything unrecognised), or when its value is
-    missing or needs shell expansion.
+    ``--project``, ``--package``, ``--env-file`` or anything unrecognised), or
+    when its value is missing, needs shell expansion or is a relative path.
     """
     options: list[str] = []
     rest = iter(args)
@@ -229,7 +237,7 @@ def _env_options(args: Sequence[str]) -> tuple[str, ...] | None:
         if not assigned:
             value = next(rest, "")
             options.append(value)
-        if not value or _SHELL_EXPANSION.search(value):
+        if not _repeatable_value(name, value):
             return None
     return tuple(options)
 
