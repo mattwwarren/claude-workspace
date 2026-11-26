@@ -578,6 +578,47 @@ def test_an_untracked_tolerated_file_survives_the_revert(
     assert (repo.worktree / "tol.txt").read_text(encoding="utf-8") == "operator\n"
 
 
+def test_a_gate_that_could_not_start_is_not_reported_as_failed(
+    repo: Repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install_real_guard_script(resolve.CLASSIFIER_SCRIPT_NAME)
+    repo.ours_and_theirs(_DOC, "ours\n", "theirs\n")
+    command = "echo gate-never-starts"
+    install_home_prep_pr_state(tmp_path / "state", ("lint", command, 5.0))
+    real_popen = subprocess.Popen
+    launches: list[str] = []
+
+    def _popen(argv: Any, *args: Any, **kwargs: Any) -> Any:
+        if command in argv:
+            launches.append(command)
+            msg = "no exec"
+            raise OSError(msg)
+        return real_popen(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", _popen)
+    pre, tip = repo.head(), repo.origin_tip()
+
+    def _real_gates() -> FinalizeGateRun:
+        return run_finalize_quality_gates(
+            repo.worktree,
+            scope=gate_scope("T-9", "acme", "s-1"),
+            path="resolve",
+            ci=CiContext(base="main", head=pre),
+        )
+
+    outcome = _resolve(repo, run_gates=_real_gates)
+
+    assert launches == [command]
+    assert outcome.block is not None
+    assert (
+        "but the quality gates could not run: the repo's quality gates could not "
+        "be run: gate lint could not be started: no exec; reverted"
+        in outcome.block.details
+    )
+    assert "gate lint failed" not in outcome.block.details
+    _assert_untouched(repo, pre, tip)
+
+
 def test_a_gate_that_moved_head_is_not_reverted(repo: Repo) -> None:
     install_real_guard_script(resolve.CLASSIFIER_SCRIPT_NAME)
     repo.ours_and_theirs(_DOC, "ours\n", "theirs\n")

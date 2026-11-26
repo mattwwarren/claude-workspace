@@ -442,7 +442,7 @@ def _gate_park(
         )
     else:
         details = block.details if block is not None else "no reason recorded"
-        what = f"the quality gates could not run: {redact_and_cap(details)}"
+        what = f"the quality gates could not run: {_capped(details)}"
     try:
         why = _revert(attempt)
     except _GIT_ERRORS as exc:

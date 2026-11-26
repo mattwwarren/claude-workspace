@@ -689,7 +689,8 @@ def run_finalize_quality_gates(
     return FinalizeGateRun(
         block,
         ci_plan.friction,
-        failed_gate=failure.gate,
+        # A gate that never started did not fail: its reason is in the block.
+        failed_gate="" if failure.kind == "unavailable" else failure.gate,
         failed_output=redact_and_cap(failure.output) if failure.output else "",
     )
 
