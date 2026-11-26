@@ -535,9 +535,14 @@ class TestArmRefusalRepair:
 
         assert outcome is not None
         assert outcome.block is not None
-        assert "repair not attempted: git fetch origin epic/1 failed" in (
-            outcome.block.details
+        original = _arm_block(_CONFLICT_STDERR)
+        assert outcome.block.details.startswith(
+            f"{original.details}; repair not attempted: "
+            "git fetch origin epic/1 failed: "
         )
+        assert outcome.block.reason == original.reason
+        assert outcome.block.retry_eligible == original.retry_eligible
+        assert outcome.block.pr_info == original.pr_info
         assert not outcome.block.details.startswith(
             f"{PR_CONFLICTING_PREFIX} changelog-sync"
         )

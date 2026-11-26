@@ -58,6 +58,7 @@ from tests.test_codex_finalize_run import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from types import ModuleType
 
     from cw.codex_runner import CodexRunResult
 
@@ -145,9 +146,11 @@ def _runs(log: Path) -> int:
     return len(log.read_text(encoding="utf-8").split()) if log.exists() else 0
 
 
-def _publish_rescripts(h: Harness, mergeable: str = "MERGEABLE") -> None:
-    """After the resolver's push, GitHub reports the new head and *mergeable*."""
-    real_push = resolve.push_ahead
+def _publish_rescripts(
+    h: Harness, mergeable: str = "MERGEABLE", *, module: ModuleType = resolve
+) -> None:
+    """After *module*'s push, GitHub reports the new head and *mergeable*."""
+    real_push = module.push_ahead
 
     def _push(worktree: Path, *, branch: str, head_sha: str) -> object:
         block = real_push(worktree, branch=branch, head_sha=head_sha)
@@ -156,7 +159,7 @@ def _publish_rescripts(h: Harness, mergeable: str = "MERGEABLE") -> None:
             _merge_view(h, mergeable, "CLEAN" if mergeable == "MERGEABLE" else "DIRTY")
         return block
 
-    h.monkeypatch.setattr(resolve, "push_ahead", _push)
+    h.monkeypatch.setattr(module, "push_ahead", _push)
 
 
 def _mid_merge(h: Harness) -> bool:
@@ -506,27 +509,11 @@ def _moving_sync(calls: list[tuple[str, dict[str, Any]]]) -> Callable[..., Any]:
     def _sync(worktree: Path, base: str, **kwargs: Any) -> ChangelogSync:
         calls.append((base, kwargs))
         name = f"moved-{len(calls)}.txt"
-        (worktree / name).write_text("x\n", encoding="utf-8")
-        git_in(worktree, "add", name)
-        git_in(worktree, "commit", "-q", "-m", f"sync {len(calls)}")
+        commit_tracked_file(worktree, name)
         head = git_in(worktree, "rev-parse", "HEAD")
         return ChangelogSync(SyncState.MOVED, None, head, None, (), (), "")
 
     return _sync
-
-
-def _pushing_then_reading(h: Harness) -> None:
-    """After the repair's push, GitHub reports the pushed head, mergeable."""
-    real_push = repair.push_ahead
-
-    def _push(worktree: Path, *, branch: str, head_sha: str) -> object:
-        block = real_push(worktree, branch=branch, head_sha=head_sha)
-        if block is None:
-            _script_head(h, head_sha)
-            _merge_view(h, "MERGEABLE", "CLEAN")
-        return block
-
-    h.monkeypatch.setattr(repair, "push_ahead", _push)
 
 
 def _arm_calls(h: Harness) -> list[list[str]]:
@@ -540,7 +527,7 @@ def test_a_merge_freeze_refusal_is_synced_refenced_and_re_armed(
     h.arm = stub_prep_pr_finalize(Path.home(), arm_refusals=(_FREEZE_REFUSAL,))
     calls: list[tuple[str, dict[str, Any]]] = []
     h.monkeypatch.setattr(repair, "sync_changelog", _moving_sync(calls))
-    _pushing_then_reading(h)
+    _publish_rescripts(h, module=repair)
 
     result = h.run()
 
@@ -562,7 +549,7 @@ def test_a_reused_pr_repairs_a_merge_freeze_too(
     h.arm = stub_prep_pr_finalize(Path.home(), arm_refusals=(_FREEZE_REFUSAL,))
     calls: list[tuple[str, dict[str, Any]]] = []
     h.monkeypatch.setattr(repair, "sync_changelog", _moving_sync(calls))
-    _pushing_then_reading(h)
+    _publish_rescripts(h, module=repair)
 
     result = h.run()
 
@@ -600,10 +587,12 @@ def test_a_failed_freeze_sync_blocks_with_the_hint(
     refused = ChangelogSync(SyncState.REFUSED, None, None, "dirty", (), (), "dirty")
     h.monkeypatch.setattr(repair, "sync_changelog", lambda *_a, **_k: refused)
 
-    result = h.run()
+    result, payload = _run_handing(h)
 
     assert result.blocker is not None
     assert result.blocker.reason == AUTOMERGE_NOT_ARMED
+    assert payload["pr_info"]["number"] == PR_NUMBER
+    assert payload["pr_info"]["url"] == PR_URL
     assert result.blocker.details.startswith(
         f"{FREEZE_PREFIX} changelog-sync refused (dirty): dirty\n"
     )
@@ -621,7 +610,7 @@ def test_a_second_freeze_refusal_blocks_after_one_sync(
     )
     calls: list[tuple[str, dict[str, Any]]] = []
     h.monkeypatch.setattr(repair, "sync_changelog", _moving_sync(calls))
-    _pushing_then_reading(h)
+    _publish_rescripts(h, module=repair)
 
     result = h.run()
 
@@ -640,7 +629,7 @@ def test_a_conflicting_arm_refusal_is_union_synced_and_re_armed(
     h.arm = stub_prep_pr_finalize(Path.home(), arm_refusals=(_UNION_REFUSAL,))
     calls: list[tuple[str, dict[str, Any]]] = []
     h.monkeypatch.setattr(repair, "sync_changelog", _moving_sync(calls))
-    _pushing_then_reading(h)
+    _publish_rescripts(h, module=repair)
 
     result = h.run()
 
@@ -723,7 +712,7 @@ def test_each_repair_runs_once_in_one_run(
     )
     calls: list[tuple[str, dict[str, Any]]] = []
     h.monkeypatch.setattr(repair, "sync_changelog", _moving_sync(calls))
-    _pushing_then_reading(h)
+    _publish_rescripts(h, module=repair)
 
     result = h.run()
 
@@ -743,7 +732,7 @@ def test_a_re_fence_park_stops_before_the_re_arm(
     h.arm = stub_prep_pr_finalize(Path.home(), arm_refusals=(_FREEZE_REFUSAL,))
     calls: list[tuple[str, dict[str, Any]]] = []
     h.monkeypatch.setattr(repair, "sync_changelog", _moving_sync(calls))
-    _pushing_then_reading(h)
+    _publish_rescripts(h, module=repair)
 
     result = h.run()
 
