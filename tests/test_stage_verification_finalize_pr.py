@@ -399,6 +399,25 @@ class TestPushAhead:
         assert block.reason == IMPL_NOT_PUSHED
         assert "boom" in block.details
 
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            f"remote: password={'qz' * 300}",
+            f"fatal: Authentication failed; token: {'qz' * 300}",
+        ],
+        ids=["impl-not-pushed", "push-auth-failed"],
+    )
+    def test_a_secret_straddling_the_cut_never_reaches_the_details(
+        self, worktree: Path, stderr: str
+    ) -> None:
+        error = subprocess.CalledProcessError(1, "git push", stderr=stderr)
+        with patch(
+            "cw.stage_verification.finalize_pr.push_and_verify_head", side_effect=error
+        ):
+            block = push_ahead(worktree, branch=_BRANCH, head_sha=_HEAD)
+        assert block is not None
+        assert "qzqz" not in block.details
+
     def test_a_remote_tip_mismatch_is_impl_not_pushed(self, worktree: Path) -> None:
         _commit(worktree)
         block = push_ahead(worktree, branch=_BRANCH, head_sha="c" * 40)

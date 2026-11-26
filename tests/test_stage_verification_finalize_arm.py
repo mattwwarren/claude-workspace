@@ -513,6 +513,17 @@ class TestMarkAdoptedReady:
             "adopted draft PR #7 could not be marked ready: "
         ).strip()
 
+    @pytest.mark.parametrize("pad", [0, 200])
+    def test_a_secret_straddling_the_cut_never_reaches_the_details(
+        self, repo: Path, pad: int
+    ) -> None:
+        # The assignment's name lies before the last 500 characters, its value
+        # inside them.
+        _stub(ready_exit=1, ready_stdout=f"{'x' * pad} password={'qz' * 300}")
+        block, _ = mark_adopted_ready(repo, pr_number=7, pr_info=_PR_INFO)
+        assert block is not None
+        assert "qzqz" not in block.details
+
     def test_no_script_is_agent_block(self, repo: Path) -> None:
         block, _ = mark_adopted_ready(repo, pr_number=7, pr_info=_PR_INFO)
         assert block is not None

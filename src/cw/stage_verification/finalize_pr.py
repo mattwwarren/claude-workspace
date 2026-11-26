@@ -47,7 +47,7 @@ from cw.stage_verification.finalize_result import (
     classify_unavailability,
 )
 from cw.stage_verification.impl_feedback import PROBE_UNAVAILABLE, probe_default_branch
-from cw.stage_verification.posted_text import redact_and_cap
+from cw.stage_verification.posted_text import redact_and_cap, redacted_tail
 from cw.stage_verification.push import push_and_verify_head
 
 if TYPE_CHECKING:
@@ -215,7 +215,7 @@ def push_ahead(worktree: Path, *, branch: str, head_sha: str) -> FinalizeBlock |
         push_and_verify_head(worktree, head_sha)
     except (subprocess.CalledProcessError, OSError) as exc:
         stderr = str(getattr(exc, "stderr", "") or exc)
-        tail = redact_and_cap(stderr.strip()[-_TAIL:])
+        tail = redacted_tail(stderr)
         reason = classify_unavailability(stderr)
         if reason is not None:
             return FinalizeBlock(

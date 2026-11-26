@@ -21,6 +21,7 @@ ADDED_LINE_MAX_CHARS = 120
 POSTED_TEXT_MAX_CHARS = 2000
 TRUNCATION_MARKER = "...[truncated]"
 _MARKER_BYTES = len(TRUNCATION_MARKER.encode("utf-8"))
+OUTPUT_TAIL_CHARS = 500
 WITHHELD = "<source text withheld: looks like a secret assignment>"
 
 # An assignment (`=` or `:`) to an identifier, dotted name or quoted key whose
@@ -83,6 +84,20 @@ def withhold_secret_lines(text: str) -> str:
     return "\n".join(
         WITHHELD if looks_like_secret(line) else line for line in text.splitlines()
     )
+
+
+def redacted_tail(text: str) -> str:
+    """The end of subprocess *text*, secrets withheld before anything is cut.
+
+    A cut first could drop the ``password =`` or token prefix that marks a
+    secret and keep its value. JSON output escapes the quotes of a quoted source
+    line, so each line is also checked unescaped.
+    """
+    safe = "\n".join(
+        WITHHELD if looks_like_secret(line.replace('\\"', '"')) else line
+        for line in text.strip().splitlines()
+    )
+    return redact_and_cap(redact(safe)[-OUTPUT_TAIL_CHARS:])
 
 
 def describe_added_line(text: str) -> str:

@@ -35,7 +35,7 @@ from cw.stage_verification.finalize_result import (
     OPERATOR_UNAVAILABLE,
     FinalizeBlock,
 )
-from cw.stage_verification.posted_text import redact_and_cap
+from cw.stage_verification.posted_text import redact_and_cap, redacted_tail
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -300,10 +300,10 @@ def mark_adopted_ready(
     if done.returncode != 0:
         gh_stderr = data.get("gh_stderr") if data is not None else None
         if isinstance(gh_stderr, str) and gh_stderr.strip():
-            why = redact_and_cap(gh_stderr.strip())
+            why = redacted_tail(gh_stderr)
         else:
-            raw = f"{done.stdout or ''}\n{done.stderr or ''}".strip()
-            why = redact_and_cap(raw[-_TAIL:]) or f"exit {done.returncode}"
+            raw = f"{done.stdout or ''}\n{done.stderr or ''}"
+            why = redacted_tail(raw) or f"exit {done.returncode}"
         return _ready_block(pr_number, why, pr_info), []
     flipped = data is not None and data.get("flipped") is True
     return None, [DRAFT_FLIPPED_FRICTION] if flipped else []
