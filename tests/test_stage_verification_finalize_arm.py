@@ -544,3 +544,21 @@ class TestMarkAdoptedReady:
         assert block is not None
         assert block.reason == "operator_unavailable"
         assert block.retry_eligible is True
+
+
+class TestArmGhStderr:
+    """The refusal's JSON ``gh_stderr`` is exposed for the arm-time repairs (#3939)."""
+
+    def test_exit_one_exposes_the_json_gh_stderr(self, repo: Path) -> None:
+        text = f"{FREEZE_PREFIX} x"
+        _stub(
+            arm_exit=1, arm_stdout=json.dumps({"status": "failed", "gh_stderr": text})
+        )
+        assert _arm(repo).gh_stderr == text
+
+    def test_a_non_json_refusal_exposes_no_gh_stderr(self, repo: Path) -> None:
+        _stub(arm_exit=1, arm_stdout="not json", arm_stderr=f"{FREEZE_PREFIX} x")
+        result = _arm(repo)
+        assert result.gh_stderr == ""
+        assert result.block is not None
+        assert "changelog-sync" in result.block.details

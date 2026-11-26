@@ -1768,6 +1768,13 @@ if sys.argv[1] == "check-automerge-allowed":
     sys.stderr.write({check_stderr!r})
     sys.exit({check_exit})
 if sys.argv[1] == "arm-automerge":
+    with open(CALLS, encoding="utf-8") as handle:
+        arms = sum(1 for line in handle if line.startswith("arm-automerge\\x1f"))
+    if arms <= len({arm_refusals!r}):
+        import json
+        refusal = {arm_refusals!r}[arms - 1]
+        sys.stdout.write(json.dumps({{"status": "failed", "gh_stderr": refusal}}))
+        sys.exit(1)
     sys.stdout.write({arm_stdout!r})
     sys.stderr.write({arm_stderr!r})
     sys.exit({arm_exit})
@@ -1806,6 +1813,7 @@ def stub_prep_pr_finalize(
     arm_stdout: str = "",
     arm_gh_stderr: str = "",
     arm_stderr: str = "",
+    arm_refusals: tuple[str, ...] = (),
     hold_exit: int = 0,
     hold_stderr: str = "",
     ready_exit: int = 0,
@@ -1823,7 +1831,9 @@ def stub_prep_pr_finalize(
     for). ``ready <n>`` exits *ready_exit* and prints *ready_stdout* (default:
     the ``ReadyResult`` of an already-ready PR; ``<PR_NUMBER>`` is replaced by
     *n*). Any other subcommand exits 2. Every call is logged; read it with
-    :meth:`ScriptStub.calls`.
+    :meth:`ScriptStub.calls`. The n-th ``arm-automerge`` call, for n up to
+    ``len(arm_refusals)``, prints ``{"status": "failed", "gh_stderr": <item>}``
+    and exits 1; later calls follow *arm_exit*/*arm_stdout* (#3939).
     """
     scripts = root / ".claude" / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
@@ -1839,6 +1849,7 @@ def stub_prep_pr_finalize(
             arm_stdout=arm_stdout,
             arm_stderr=arm_stderr,
             arm_exit=arm_exit,
+            arm_refusals=arm_refusals,
             hold_stdout=_HOLD_STUB_STDOUT
             if hold_exit == 0
             else dict.fromkeys(_HOLD_STUB_STDOUT, ""),

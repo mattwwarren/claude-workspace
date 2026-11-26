@@ -16,8 +16,14 @@ import pytest
 from cw.changelog_sync import ChangelogSync, SyncState
 from cw.merge_probe import probe_default_merge
 from cw.stage_verification import finalize_changelog_repair as repair
+from cw.stage_verification.finalize_arm import (
+    FREEZE_PREFIX,
+    PR_CONFLICTING_PREFIX,
+    ArmResult,
+)
 from cw.stage_verification.finalize_pr import BEHIND_FRICTION
 from cw.stage_verification.finalize_result import (
+    AUTOMERGE_NOT_ARMED,
     IMPL_NOT_PUSHED,
     MERGE_CONFLICT_POST_PUSH,
     OPERATOR_UNAVAILABLE,
@@ -38,6 +44,7 @@ if TYPE_CHECKING:
 
 _URL = "https://github.com/acme/app/pull/9"
 _BRANCH = "dev/GEN-1"
+BRANCH_ARM = _changelog_cut_helpers.BRANCH
 _DIRTY = merge_view("CONFLICTING", "DIRTY")
 _CLEAN = merge_view("MERGEABLE", "CLEAN")
 
@@ -345,3 +352,255 @@ class TestRepairSeamStates:
         assert outcome.block.reason == OPERATOR_UNAVAILABLE
         assert "no head_sha" in outcome.block.details
         assert outcome.head is None
+
+
+_FREEZE_STDERR = f"{FREEZE_PREFIX} the release-cut freeze holds this PR"
+_CONFLICT_STDERR = f"{PR_CONFLICTING_PREFIX} GitHub reports the PR conflicting"
+
+
+def _arm_refusal(gh_stderr: str) -> ArmResult:
+    """An exit-1 arm refusal as ``finalize_arm.arm`` builds it."""
+    block = FinalizeBlock(
+        AUTOMERGE_NOT_ARMED,
+        f"arm-automerge failed; gh_stderr: {gh_stderr}",
+        retry_eligible=True,
+    )
+    return ArmResult(block=block, gh_stderr=gh_stderr)
+
+
+def _repair_arm(
+    clone: Path,
+    gh_stderr: str,
+    *,
+    base: str = "main",
+    spent: frozenset[str] = frozenset(),
+) -> repair.ArmRepair | None:
+    return repair.repair_arm_refusal(
+        clone,
+        _arm_refusal(gh_stderr),
+        spent=spent,
+        base_branch=base,
+        default_branch="main",
+        branch=BRANCH_ARM,
+    )
+
+
+class TestArmRefusalRepair:
+    """The arm-time repairs of #3939: a release-cut freeze and a ``pr_conflicting:``."""
+
+    def test_freeze_refusal_syncs_and_pushes_for_a_re_arm(
+        self, tmp_path: Path, make_git_repo: Callable[..., Path]
+    ) -> None:
+        clone = _changelog_cut_helpers.cut_straddle_repo(tmp_path, make_git_repo).clone
+        before = git_in(clone, "rev-parse", "HEAD")
+
+        outcome = _repair_arm(clone, _FREEZE_STDERR)
+
+        assert outcome is not None
+        assert outcome.block is None
+        assert outcome.head == git_in(clone, "rev-parse", "HEAD")
+        assert outcome.head == git_in(clone, "rev-parse", f"origin/{BRANCH_ARM}")
+        git_in(clone, "merge-base", "--is-ancestor", before, outcome.head or "")
+        assert outcome.friction == repair.RELEASE_CUT_SYNC_FRICTION
+
+    def test_freeze_refusal_with_nothing_to_sync_re_arms_without_a_push(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        clone = _changelog_cut_helpers.epic_sibling_repo(tmp_path, make_git_repo)
+
+        def _no_push(*_a: object, **_k: object) -> None:
+            message = "a clean sync must not push"
+            raise AssertionError(message)
+
+        monkeypatch.setattr(repair, "push_ahead", _no_push)
+        outcome = _repair_arm(clone, _FREEZE_STDERR)
+
+        assert outcome == repair.ArmRepair(FREEZE_PREFIX)
+        assert outcome is not None
+        assert outcome.block is None
+        assert outcome.head is None
+        assert outcome.friction is None
+
+    @pytest.mark.parametrize("state", [SyncState.REFUSED, SyncState.CONFLICT])
+    def test_a_freeze_sync_that_cannot_help_keeps_the_block_and_hint(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        state: SyncState,
+    ) -> None:
+        clone = _changelog_cut_helpers.epic_sibling_repo(tmp_path, make_git_repo)
+        stuck = ChangelogSync(state, None, None, "x-disposition", (), (), "why")
+        monkeypatch.setattr(repair, "sync_changelog", lambda *_a, **_k: stuck)
+
+        outcome = _repair_arm(clone, _FREEZE_STDERR)
+
+        assert outcome is not None
+        assert outcome.block is not None
+        assert outcome.head is None
+        assert outcome.block.details.startswith(
+            f"{FREEZE_PREFIX} changelog-sync {state} (x-disposition): why"
+        )
+        assert outcome.block.details.endswith(f"gh_stderr: {_FREEZE_STDERR}")
+        assert outcome.block.retry_eligible is True
+
+    def test_a_dirty_worktree_refuses_the_freeze_sync(
+        self, tmp_path: Path, make_git_repo: Callable[..., Path]
+    ) -> None:
+        clone = _changelog_cut_helpers.cut_straddle_repo(tmp_path, make_git_repo).clone
+        head = git_in(clone, "rev-parse", "HEAD")
+        (clone / "CHANGELOG.md").write_text("dirty\n", encoding="utf-8")
+
+        outcome = _repair_arm(clone, _FREEZE_STDERR)
+
+        assert outcome is not None
+        assert outcome.block is not None
+        assert "refused (dirty_worktree)" in outcome.block.details
+        assert git_in(clone, "rev-parse", "HEAD") == head
+
+    def test_conflicting_refusal_union_syncs_and_pushes(
+        self, tmp_path: Path, make_git_repo: Callable[..., Path]
+    ) -> None:
+        clone = _epic_repo(tmp_path, make_git_repo)
+
+        outcome = _repair_arm(clone, _CONFLICT_STDERR, base="epic/1")
+
+        assert outcome is not None
+        assert outcome.block is None
+        assert outcome.head == git_in(clone, "rev-parse", f"origin/{_BRANCH}")
+        assert outcome.friction == repair.CHANGELOG_UNION_FRICTION
+
+    def test_conflicting_refusal_on_the_default_base_is_not_repaired(
+        self, tmp_path: Path, make_git_repo: Callable[..., Path]
+    ) -> None:
+        clone = _epic_repo(tmp_path, make_git_repo)
+
+        def _boom(*_a: object, **_k: object) -> None:
+            message = "the default base must not be fetched or synced"
+            raise AssertionError(message)
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(repair, "fetch_default_branch", _boom)
+            patch.setattr(repair, "sync_changelog", _boom)
+            assert _repair_arm(clone, _CONFLICT_STDERR) is None
+
+    def test_a_union_sync_that_does_not_move_keeps_the_block(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        clone = _epic_repo(tmp_path, make_git_repo)
+        stuck = ChangelogSync(SyncState.CONFLICT, None, None, None, ("A.md",), (), "")
+        monkeypatch.setattr(repair, "sync_changelog", lambda *_a, **_k: stuck)
+
+        outcome = _repair_arm(clone, _CONFLICT_STDERR, base="epic/1")
+
+        assert outcome is not None
+        assert outcome.block is not None
+        assert outcome.block.details.startswith(
+            f"{PR_CONFLICTING_PREFIX} changelog-sync conflict (-): "
+        )
+        assert outcome.head is None
+
+    def test_a_union_fetch_failure_keeps_the_block_unsynced(
+        self, tmp_path: Path, make_git_repo: Callable[..., Path]
+    ) -> None:
+        clone = _epic_repo(tmp_path, make_git_repo)
+        git_in(clone, "remote", "set-url", "origin", str(tmp_path / "nope"))
+
+        outcome = _repair_arm(clone, _CONFLICT_STDERR, base="epic/1")
+
+        assert outcome is not None
+        assert outcome.block is not None
+        assert "repair not attempted: git fetch origin epic/1 failed" in (
+            outcome.block.details
+        )
+        assert not outcome.block.details.startswith(
+            f"{PR_CONFLICTING_PREFIX} changelog-sync"
+        )
+        assert outcome.head is None
+
+    @pytest.mark.parametrize(
+        ("gh_stderr", "base"),
+        [(FREEZE_PREFIX + " x", "main"), (PR_CONFLICTING_PREFIX + " x", "epic/1")],
+    )
+    def test_a_failed_push_keeps_the_block_and_says_the_merge_is_local(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        gh_stderr: str,
+        base: str,
+    ) -> None:
+        clone = _epic_repo(tmp_path, make_git_repo)
+        refused = FinalizeBlock(
+            OPERATOR_UNAVAILABLE, "push refused", retry_eligible=True
+        )
+        monkeypatch.setattr(repair, "push_ahead", lambda *_a, **_k: refused)
+        monkeypatch.setattr(
+            repair,
+            "sync_changelog",
+            lambda *_a, **_k: ChangelogSync(
+                SyncState.MOVED, "a" * 40, "b" * 40, None, (), (), ""
+            ),
+        )
+
+        outcome = _repair_arm(clone, gh_stderr, base=base)
+
+        assert outcome is not None
+        assert outcome.head is None
+        assert outcome.block is not None
+        assert outcome.block.reason == AUTOMERGE_NOT_ARMED
+        assert outcome.block.retry_eligible is False
+        assert "push refused" in outcome.block.details
+        assert "exists only in the local" in outcome.block.details
+
+    def test_moved_without_a_head_keeps_the_block_not_retryable(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        clone = _epic_repo(tmp_path, make_git_repo)
+        moved = ChangelogSync(SyncState.MOVED, "a" * 40, None, None, (), (), "")
+        monkeypatch.setattr(repair, "sync_changelog", lambda *_a, **_k: moved)
+
+        outcome = _repair_arm(clone, _FREEZE_STDERR)
+
+        assert outcome is not None
+        assert outcome.block is not None
+        assert "moved but reported no head_sha" in outcome.block.details
+        assert outcome.block.retry_eligible is False
+
+    @pytest.mark.parametrize(
+        ("gh_stderr", "spent"),
+        [
+            ("plain refusal", frozenset()),
+            ("", frozenset()),
+            (_FREEZE_STDERR, frozenset({FREEZE_PREFIX})),
+            (_CONFLICT_STDERR, frozenset({PR_CONFLICTING_PREFIX})),
+        ],
+    )
+    def test_unrepairable_refusals_return_none(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        gh_stderr: str,
+        spent: frozenset[str],
+    ) -> None:
+        clone = _epic_repo(tmp_path, make_git_repo)
+
+        assert _repair_arm(clone, gh_stderr, base="epic/1", spent=spent) is None
+        no_block = repair.repair_arm_refusal(
+            clone,
+            ArmResult(),
+            spent=frozenset(),
+            base_branch="epic/1",
+            default_branch="main",
+            branch=BRANCH_ARM,
+        )
+        assert no_block is None

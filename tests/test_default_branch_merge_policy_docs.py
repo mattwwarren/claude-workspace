@@ -1193,6 +1193,14 @@ class TestReleaseCutException:
         for adr_name, _why in _SCRIPT_MERGE_TREE_SPAWNERS.values():
             assert adr_name in architecture
 
+    def test_runbook_says_codex_finalize_runs_the_arm_repairs(self) -> None:
+        runbook = _read("docs/dispatch-runbook.md")
+
+        assert "only the Step 4d exit-1 handler does" not in runbook
+        assert "Two claude-native Step 4d repairs are not done" not in runbook
+        assert "**Arm-refusal repairs (#3939).**" in runbook
+        assert "changelog_synced_after_release_cut" in runbook
+
     def test_runbook_states_the_exception_the_layers_and_the_limit(self) -> None:
         section = _merge_policy_section()
 
