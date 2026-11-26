@@ -619,6 +619,8 @@ def _start(run: _Run, pre: _Pre) -> _Flow | ImplBlock:
         merge=merge,
         gate_plan=plan_cycle_gates(run.worktree, scope),
         scope=scope,
+        # stays on client.default_branch: tests.prepare runs on the host, so
+        # only the trust-root branch may supply it (#3531).
         prepare=pin_prepare(run.worktree, run.client.default_branch),
         conflict_before=(
             conflict_fingerprints(run.worktree, merge.conflicted)
