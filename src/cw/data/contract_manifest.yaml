@@ -839,7 +839,7 @@ elements:
   impl.gate-type-check:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3531}, note: "gate 3 (claimed test command) and gate 4 (mypy baseline) are #3531"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_impl/_type_gate.py, symbol: run_type_check_gate}, note: "gate 4 runs ruff and mypy on the touched Python files in a detached gate worktree, after the default branch's tests.prepare; each tool runs only when a declared gate invokes it through uv run, and wrapper-declared gates (make lint, pre-commit run) skip gate 4 with a friction token, unlike claude-native; with no baseline only mypy errors in touched files block (or any failure that is not an exit-1 untouched-only result), and untouched-file errors newly exposed outside the repo gate's scope are not attributed, a divergence from the claude-native transitive rule; the strict-override check is not mechanized, and the override sweep relies on the repo's whole-tree mypy gate"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.pre-mutation-guard:
@@ -857,13 +857,13 @@ elements:
   impl.following-completion-artifacts-block-verbatim:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3531}, note: "the Completion Artifacts block and its claimed-test re-run are #3531"}
+      codex: {disposition: not-applicable, reason: "the codex turn emits no Completion Artifacts block and makes no test claim, so gate 3 has nothing to re-run; cw runs the repo's declared gates itself (src/cw/stage_verification/impl_gates.py run_quality_gates)"}
       opencode: {disposition: not-applicable, reason: "names Claude Code-only machinery (Agent tool, Skill tool, hooks); opencode prompts are self-contained (see the shared-fragment note in src/cw/opencode_runner.py)"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.gate-orchestrator-completion:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/impl_gates.py, symbol: run_quality_gates}, note: "cw runs the repo quality gates and parks impl_failed with the verbatim gate output"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/impl_gates.py, symbol: run_quality_gates}, note: "cw runs the repo quality gates and parks impl_failed with the verbatim gate output; gate 3 is not applicable (no test claim); gate 4 is run_type_check_gate in src/cw/codex_impl/_type_gate.py (see impl.gate-type-check for its limits); gate 5 is not applicable because cw makes the one commit"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3260}, note: "an IMPL obligation aider could meet that LocalExecutor does not drive"}
   impl.gate-helper-missing:
@@ -959,13 +959,13 @@ elements:
   impl.type-check-gate-mypy-baseline:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3531}, note: "gate 4 (mypy-baseline comparison) is #3531"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/impl_type_gate.py, symbol: detect_mypy_baseline}, note: "the consumer is read from the pinned gate commands (mypy-baseline filter or --baseline-file) and the file from the fork point; a tracked baseline with no visible consumer skips the mypy block with a friction token and keeps the no-growth check"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3260}, note: "an IMPL obligation aider could meet that LocalExecutor does not drive"}
   impl.orchestrator-record:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3531}, note: "the orchestrator-side record of the claimed gates is #3531"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/impl_type_gate.py, symbol: record_baselined_errors}, note: "one bare-shape entry per touched file carrying baselined errors, skipping a file that already has one; a malformed artifact is left untouched with deferred_findings_unparseable"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "no DEFERRED-REVIEW-FINDINGS record is written by the IMPL prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3260}, note: "an IMPL obligation aider could meet that LocalExecutor does not drive"}
   impl.gate-1-why-empty-diff-check:
@@ -1001,7 +1001,7 @@ elements:
   impl.gate-config:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: not-applicable, reason: "cw runs the gates; gate configuration is read by cw"}
+      codex: {disposition: not-applicable, reason: "it configures the Agent-spawn guard (src/cw/cli/_subagent_policy.py), and codex IMPL spawns no agent"}
       opencode: {disposition: not-applicable, reason: "names Claude Code-only machinery (Agent tool, Skill tool, hooks); opencode prompts are self-contained (see the shared-fragment note in src/cw/opencode_runner.py)"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.named-spawns-idle-teammates:
