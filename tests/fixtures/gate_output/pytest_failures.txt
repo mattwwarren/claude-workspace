@@ -1,0 +1,78 @@
+============================= test session starts ==============================
+platform linux -- Python 3.13.14, pytest-9.0.2, pluggy-1.6.0
+rootdir: /redacted/repo
+configfile: pyproject.toml
+plugins: xdist-3.8.0, asyncio-1.3.0, cov-7.0.0, mock-3.15.1, anyio-4.13.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 5 items
+
+tests/test_calc.py .FFF                                                  [ 80%]
+tests/test_fixture_err.py E                                              [100%]
+
+==================================== ERRORS ====================================
+_______________________ ERROR at setup of test_uses_boom _______________________
+
+fixturedef = <FixtureDef argname='boom' scope='function' baseid='tests'>
+request = <SubRequest 'boom' for <Function test_uses_boom>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+
+/redacted/venv/lib/python3.13/site-packages/pytest_asyncio/plugin.py:728: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    @pytest.fixture
+    def boom():
+>       raise RuntimeError("fixture setup failed")
+E       RuntimeError: fixture setup failed
+
+tests/conftest.py:6: RuntimeError
+=================================== FAILURES ===================================
+________________________________ test_add_wrong ________________________________
+
+    def test_add_wrong():
+>       assert add(2, 2) == 5
+E       assert 4 == 5
+E        +  where 4 = add(2, 2)
+
+tests/test_calc.py:9: AssertionError
+________________________________ test_add_type _________________________________
+
+    def test_add_type():
+>       assert add("a", 1) == "a1"
+               ^^^^^^^^^^^
+
+tests/test_calc.py:13: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+a = 'a', b = 1
+
+    def add(a, b):
+>       return a + b
+               ^^^^^
+E       TypeError: can only concatenate str (not "int") to str
+
+pkg/calc.py:6: TypeError
+____________________________ TestGroup.test_inside _____________________________
+
+self = <test_calc.TestGroup object at 0x7fa23a941a90>
+
+    def test_inside(self):
+>       assert add(0, 0) == 1
+E       assert 0 == 1
+E        +  where 0 = add(0, 0)
+
+tests/test_calc.py:18: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_calc.py::test_add_wrong - assert 4 == 5
+FAILED tests/test_calc.py::test_add_type - TypeError: can only concatenate st...
+FAILED tests/test_calc.py::TestGroup::test_inside - assert 0 == 1
+ERROR tests/test_fixture_err.py::test_uses_boom - RuntimeError: fixture setup...
+===================== 3 failed, 1 passed, 1 error in 0.02s =====================
