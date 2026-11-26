@@ -32,7 +32,11 @@ from typing import TYPE_CHECKING, Final, Literal
 
 from cw._git import git_output, run_git
 from cw.atomic import atomic_write_text
-from cw.project_config import PrepareConfigError, read_tests_prepare
+from cw.project_config import (
+    PROJECT_CONFIG_RELPATH,
+    PrepareConfigError,
+    read_tests_prepare,
+)
 from cw.review_adjudication import (
     Adjudication,
     merge_deferred_adjudications,
@@ -85,7 +89,6 @@ _GATE_ROOT_ENV: Final = "CW_GATE_ROOT"
 # Off tmpfs, as the stage doc's gate fence says; spelled as gates.py spells it.
 _DEFAULT_GATE_ROOT: Final = f"{os.sep}var/tmp"
 _SNAPSHOT_MESSAGE: Final = "cw gate 4 snapshot"
-_PROJECT_CONFIG: Final = ".claude/project-config.yaml"
 _REGULAR_MODES: Final = frozenset({"100644", "100755"})
 _SHA_PREFIX_CHARS: Final = 12
 _MAX_LISTED: Final = 20
@@ -256,9 +259,8 @@ def _prepare_ref(worktree: Path, default_branch: str) -> str:
 
 def _pinned_text(worktree: Path, ref: str) -> str | PreparePin:
     """The committed config text at *ref*, or the pin (unset or an error)."""
-    listed = run_git(
-        ["ls-tree", ref, "--", _PROJECT_CONFIG], cwd=worktree, capture_output=True
-    )
+    config = PROJECT_CONFIG_RELPATH.as_posix()
+    listed = run_git(["ls-tree", ref, "--", config], cwd=worktree, capture_output=True)
     if listed.returncode != 0:
         return PreparePin(error=f"the default-branch ref {ref} could not be read")
     entry = listed.stdout.strip()
@@ -266,9 +268,9 @@ def _pinned_text(worktree: Path, ref: str) -> str | PreparePin:
         return PreparePin()
     mode = entry.split(maxsplit=1)[0]
     if mode not in _REGULAR_MODES:
-        return PreparePin(error=f"{_PROJECT_CONFIG} at {ref} is not a regular file")
+        return PreparePin(error=f"{config} at {ref} is not a regular file")
     return git_output(
-        ["show", f"{ref}:{_PROJECT_CONFIG}"], cwd=worktree, errors="surrogateescape"
+        ["show", f"{ref}:{config}"], cwd=worktree, errors="surrogateescape"
     )
 
 
@@ -285,7 +287,7 @@ def pin_prepare(worktree: Path, default_branch: str) -> PreparePin:
         if isinstance(text, PreparePin):
             return text
         with tempfile.TemporaryDirectory(prefix="cw-prepare-pin-") as scratch:
-            path = Path(scratch) / _PROJECT_CONFIG
+            path = Path(scratch) / PROJECT_CONFIG_RELPATH
             path.parent.mkdir(parents=True)
             path.write_text(text, encoding="utf-8", errors="surrogateescape")
             return PreparePin(command=read_tests_prepare(Path(scratch)))
