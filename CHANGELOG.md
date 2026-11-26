@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Codex FINALIZE repairs two arm refusals itself (#3939).** Codex FINALIZE now runs the two arm-time repairs claude-native Step 4d already runs, once per run each: a release-cut merge freeze (`changelog_merge_freeze:`) gets one `cw worktree changelog-sync` on any base, and a `pr_conflicting:` refusal on a non-default base gets the CHANGELOG-union sync. A moved sync is pushed plainly, the fence re-runs and the arm re-runs, with friction `changelog_synced_after_release_cut` or `changelog_union_merged_after_sibling`. A clean sync re-arms with no push. Any other outcome, a failed push or a second refusal of the same kind keeps the `automerge_not_armed` block and its hint; a failed push is local-only and not retry-eligible.
+
 ## [1.113.0] - 2026-11-26
 
 ### Added
