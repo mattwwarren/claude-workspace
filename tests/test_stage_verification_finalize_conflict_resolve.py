@@ -471,9 +471,20 @@ def test_an_untracked_path_the_merge_would_overwrite_is_not_aborted(
     repo.base_adds("pkg/mod.py")
     (repo.worktree / "pkg").write_text("a local file where base has a dir\n")
     pre = repo.head()
+    real_git = resolve._git
+    calls: list[list[str]] = []
+
+    def _spy(worktree: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return real_git(worktree, args)
+
+    monkeypatch.setattr(resolve, "_git", _spy)
     outcome = _resolve(repo, run_gates=_never_gates)
     assert outcome.block is not None
     assert "git merge failed with no conflicted files" in outcome.block.details
+    # No MERGE_HEAD, so no abort is attempted.
+    assert ["rev-parse", "-q", "--verify", "MERGE_HEAD"] in calls
+    assert ["merge", "--abort"] not in calls
     assert not repo.mid_merge()
     assert repo.head() == pre
 
