@@ -4975,18 +4975,114 @@ cw does every mechanical or ordering-critical step in Python:
 - **Create path.** Step 4a merge gate (`merge_gate_blocked`,
   `prior_pipeline_pr_open`), the repo quality gates (`agent_block` on a red
   gate; nothing is pushed), the default-branch merge probe
-  (`merge_conflict_post_push`; cw never resolves a conflict), the push with
+  (`merge_conflict_post_push`; cw never merges before the push), the push with
   origin verification (`push_auth_failed` or `impl_not_pushed`), `gh pr
-  create`, the mergeability check, then the arm through `prep_pr_finalize.py`
-  with a read-back (`automerge_not_armed`). The reuse path runs the quality
-  gates, then the same live bind, probe, arm and verification.
+  create`, the mergeability check (with one semantic auto-resolve attempt on
+  a conflict), then the arm through `prep_pr_finalize.py` with a read-back
+  (`automerge_not_armed`). The reuse path runs the quality gates, then the
+  same live bind, probe, arm and verification. The reuse path never runs the
+  semantic auto-resolve.
 - **Result.** cw stamps the sentinel (`stage_reached`, `branch`, `commits`,
   `pr`, `review`, `scope.tier`, `plan_source`), takes `pr.auto_merge` from the
   verified PR head, never from the model, emits the stage events and posts the
   PR-link comment (`kind: pr_link`). A failure of either post is friction,
   not a block.
-- **Deferred.** The review-debt re-file (Step 4d, #3543) and the
-  `classify_merge_conflict.py` resolution round (#3542).
+- **Deferred.** The review-debt re-file (Step 4d, #3543).
+
+**Codex FINALIZE conflicts, base-state classifier and adopted rows (#3542).**
+Everything below is cw-run Python; no codex turn gets write access.
+
+- **Semantic auto-resolve (Step 4c.5).** Only on a run that created the PR,
+  only when the post-push mergeability check parked
+  `merge_conflict_post_push`, and only when the #3861 CHANGELOG-union repair
+  did not move HEAD (there is still at most one merge). Preconditions: local
+  HEAD is the PR head; no tracked modification at all (a tolerated tracked
+  edit or a tracked-modified review artifact disables it); after the fetch,
+  no path that `origin/<base>` adds exists untracked or ignored in the
+  worktree (`git merge` silently overwrites an ignored file). A failed
+  precondition appends `; semantic auto-resolve not attempted: <why>`. One
+  `git merge --no-edit origin/<base>`: a clean merge is pushed with no gates;
+  a merge that fails with no conflicted files is aborted (only when
+  `MERGE_HEAD` resolves) and parks; a conflict writes
+  `.cw/conflicted-files.txt`. A conflicted path listed in
+  `merge_gate_ignore_paths` is never resolved (regenerate it). cw runs
+  `classify_merge_conflict.py resolve --conflicted-files <f> --json` with its
+  own interpreter, from the worktree: absent parks with
+  `classify_merge_conflict: script absent, skipped`; a stale marker is
+  `agent_block`; a refusal, a launch failure, a timeout or unreadable exit-0
+  JSON aborts the merge and parks. On exit 0 cw stages the resolved files,
+  commits `Merge origin/<base> (semantic auto-resolve: <categories>)` with an
+  `Auto-Resolved-By: classify_merge_conflict.py (#1850)` trailer, runs the
+  quality gates on the `resolve` path (no CI consult, no classifier), pushes
+  plainly and re-checks once. A red gate resets to the pre-merge sha only when
+  this run made the merge (`HEAD^1` is the pre-merge sha on the row's branch)
+  and says `; reverted`; otherwise, or when the reset fails, the park says
+  `NOT reverted`, names the merge sha left in the worktree and the
+  `git reset --hard <pre-merge>` to run by hand, and is not retry-eligible.
+  A failed push keeps its reason, is prefixed `Step 4c.5 semantic-resolve
+  push:` (or `Step 4c.5 merge push:`) and names the merge commit that exists
+  only locally.
+- **`UNKNOWN` after the push (a divergence from Step 4c.5 item 7).** A
+  re-check that is not blocking but not `MERGEABLE` proceeds, as the #3861
+  repair does, with friction `semantic_merge_conflict_auto_resolved_unverified`
+  (the classifier ran) or `post_push_mergeability_unverified` (a clean
+  merge). A `MERGEABLE` re-check after a classifier resolve records
+  `semantic_merge_conflict_auto_resolved`. GitHub will not merge a
+  conflicting PR, so the auto-merge behind the arm is the backstop.
+- **Interrupted resolve.** A hard crash is caught by boot recovery (a moved
+  HEAD or a dirty tree parks). An in-process fault returns the row to PENDING
+  and the next run takes the OPEN-PR reuse path, which never merges: mid-merge
+  parks `codex_fix_dirty_start` at the gate baseline (run `git merge --abort`);
+  a merge committed but not pushed parks `external_state_block` at the live
+  bind (run the gates on the merge before pushing it, or reset to the PR
+  head); a pushed but not re-checked merge is a normal reuse run with no
+  auto-resolve friction token. cw adds no automatic cleanup.
+- **Base-branch-state classifier (#2320).** A red gate on the create or reuse
+  path is rerun on a clean `origin/<base>` in a detached scratch worktree
+  (`cw-gate-wt-finalize-*`, beside the session worktree, hooks off for the
+  add); the session worktree is never checked out, reset or staged. Only
+  when the compared base run completes red with the same exit code and every
+  branch failure (pytest, ruff and mypy are parsed; any other gate must print
+  the same normalised output, durations aside) does it park
+  `external_state_block` (`retry_eligible: false`): fix `origin/<base>`, merge
+  it into the branch, push and requeue. Anything else stays `agent_block`
+  and logs one WARNING `finalize_base_state_unclassified ticket=… session=…
+  gate=… reason=…`, `reason` one of `exit_code_not_comparable`,
+  `tracked_changes`, `environment_in_worktree`, `no_identity`,
+  `fetch_failed`, `scratch_tree_failed`, `did_not_complete`, `reset_failed`,
+  `base_passed`, `exit_code_differs`, `identity_differs`. An unrecognised
+  gate runs twice in the scratch tree: a warm-up that only provisions it, a
+  `git reset --hard <base sha>` there (no `git clean`, so ignored provisioned
+  state survives), then the compared run. Cost: a recognised red gate runs
+  once more, an unrecognised one up to twice more plus the scratch tree's
+  provisioning; a passing gate pays nothing. Gates are never killed
+  (ADR-0014): each base run gets the gate's own signal-only ceiling, so a
+  slow warm-up delays the park. Base runs carry the branch run's
+  `GateScope` labels, so their `codex_fix_gate` and slow-gate records follow
+  the branch run's under the same ticket and session. It cannot classify
+  (and so stays `agent_block`): a silent or non-deterministic composite gate,
+  a gate that cannot provision itself in a fresh checkout or needs a
+  `post-checkout` hook, provisioning or rebuild lines in only one of the
+  compared runs, the `uv-lock` gate (its `Using CPython` line appears only
+  without a `.venv`), and a base run that did not complete (exit 126 or 127,
+  a signal death, a launch failure). A hard-killed cw leaves the scratch
+  directory and its worktree record behind (`cw worktree gc` skips detached
+  trees): remove it with `git worktree remove --force <path>`.
+- **Delta-confirm (Step 4.0b).** When `verify-tip` refuses the tip with
+  `commits_after_clean_round` and `delta_confirm_eligible: true`, cw runs
+  `cw review converge confirm-job delta --ticket-id <T> -c <C>` (exit 75
+  repeats with `--job-id`, or restarts after a short pause; no deadline) and
+  never `converge finalize`. A `clean` round, exit 1 or an unfinished call
+  re-runs `verify-tip`, which alone decides; any other result parks
+  `review_tip_check: stale (… ; delta confirm: <outcome>)` with `<outcome>`
+  one of `refused`, `backend_unavailable`, `round_failed`, `findings`,
+  `stopped`, `still_stale`, and `next_actions: requeue_stage_review`.
+- **Adopted draft PR.** On a row with a recorded branch, when the seam allows
+  the arm, cw runs `prep_pr_finalize.py ready <N> --repo-path <wt>` just
+  before `arm-automerge` (friction `draft_flipped_ready` when it flipped the
+  draft). A failure is a retryable `agent_block` with `pr_info` (`adopted
+  draft PR #<N> could not be marked ready: <gh stderr>`) and no arm; a call
+  that does not finish is retryable `operator_unavailable`.
 
 **#1717 coordination.** `pending_operator_comment` is stamped at the shared
 `_stage_regress` chokepoint alongside #1794's `regressed_into_stage`. #1717's
