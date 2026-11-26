@@ -402,20 +402,20 @@ def test_finalize_addendum_overrides_the_remaining_claude_machinery() -> None:
         ".claude/commands/auto-dev-finalize-appendix.md",
         ".claude/commands/auto-dev.md",
         "are not available in this turn",
-        "is deferred",
         "pr_title, pr_body and override_section",
+        "Stage 5",
+        "PR-link comment",
+        "Closes #<ticket-id>",
+        "cw does not register codex PRs",
+        "must not run `review_monitor.py register`",
     ):
         assert needle in addendum, needle
+    assert "is deferred" not in addendum
+    # The one occurrence of "monitor" is the script name in the prohibition.
+    assert addendum.lower().count("monitor") == 1
     # The PR-title rules finalize.compose-pr-title-in-parent would have rendered.
     for needle in ("<type>(<scope>): <summary>", "72 characters", "GitHub-numeric"):
         assert needle in addendum, needle
-    # #3542: the conflict machinery is cw's now, not deferred.
-    deferred = addendum.split("Their machinery", 1)[1].split("do not improvise", 1)[0]
-    assert "conflict-resolution round" not in deferred
-    assert "semantic auto-resolve" not in deferred
-    # #3543: the review artifacts are cw's now, so only the CI wait is deferred.
-    assert "review debt re-file" not in deferred
-    assert "review-findings comment" not in deferred
     for token in CLAUDE_ONLY_DENYLIST:
         assert token not in addendum, token
 
@@ -934,3 +934,13 @@ def test_plan_addendum_names_the_bindings_section_not_a_tool() -> None:
     addendum = render_module._PLAN_CODEX_ADDENDUM
     assert f'the "{BINDINGS_SECTION}" section injected below' in addendum
     assert "get_issue" not in addendum
+
+
+def test_finalize_render_drops_the_ci_wait_block() -> None:
+    """The codex FINALIZE render drops the Stage 5 CI wait block (#3544)."""
+    ids = {
+        block.element_id
+        for block in stage_blocks("finalize", CODEX_BACKEND, docs_root=_COMMANDS_ROOT)
+    }
+    assert "finalize.wait-for-ci" not in ids
+    assert "finalize.post-ship-pipeline-bookkeeping" in ids

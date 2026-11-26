@@ -1775,7 +1775,7 @@ elements:
   finalize.post-ship-pipeline-bookkeeping:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3544}, note: "CI wait and pipeline bookkeeping on codex FINALIZE"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_finalize/_run.py, symbol: _arm_and_ship}, note: "ship-tail work in _arm_and_ship (review artifacts, arm, verification); PR-link comment: src/cw/codex_finalize/_post.py::post_pr_link_comment; not carried: two arm-time repairs (#3939); cw performs no Linear state transition (#3938)"}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   finalize.gate-ui-evidence:
@@ -1823,13 +1823,13 @@ elements:
   finalize.wait-for-ci:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3544}, note: "CI wait and pipeline bookkeeping on codex FINALIZE"}
+      codex: {disposition: not-applicable, reason: "Stage 5 is skipped headless and codex FINALIZE is always headless; post-ship, src/cw/shipped_pr_signal.py::scan_shipped_red_prs pages only when the PR is auto-merge-ARMED with a failing required check, and src/cw/shipped_pr_recovery.py::prepare_red_pr_recovery (cw dev-queue recover-red-pr) recovers it; a shipped but unarmed PR (a UI-evidence hold, pr.auto_merge: false) is never paged; recovery needs impl and review in the lane pipeline and a claude-native or codex IMPL backend (src/cw/dev_queue/red_pr_recovery.py::red_pr_refusal), so a lane with an opencode or local IMPL backend can be paged but not recovered that way; paging is off when shipped_red_signal_enabled is false (src/cw/dispatch/loop.py)"}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   finalize.fix-ci-failure:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: not-applicable, reason: "Stage 5 CI handling is skipped headless; codex FINALIZE never waits for CI"}
+      codex: {disposition: not-applicable, reason: "Stage 5 CI handling is skipped headless; codex FINALIZE never waits for CI; a red shipped PR is recovered by src/cw/shipped_pr_recovery.py::prepare_red_pr_recovery (cw dev-queue recover-red-pr); recovery needs impl and review in the lane pipeline and a claude-native or codex IMPL backend (src/cw/dev_queue/red_pr_recovery.py::red_pr_refusal), so a lane with an opencode or local IMPL backend can be paged but not recovered that way; paging is off when shipped_red_signal_enabled is false (src/cw/dispatch/loop.py)"}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   finalize.address:
@@ -2056,7 +2056,7 @@ elements:
   ship-it.create-pr:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: not-applicable, reason: "cw does this in Python on the codex FINALIZE lane (cw.stage_verification.finalize_pr.create_pr_for)"}
+      codex: {disposition: not-applicable, reason: "cw does this in Python on the codex FINALIZE lane (cw.stage_verification.finalize_pr.create_pr_for); the Closes line: cw.stage_verification.finalize_result.with_closes_trailer"}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   ship-it.changelog-gate-compliance:
@@ -2074,7 +2074,7 @@ elements:
   ship-it.register-pr-monitor:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: not-applicable, reason: "cw does this in Python on the codex FINALIZE lane: CI wait and PR monitoring are #3544"}
+      codex: {disposition: not-applicable, reason: "cw does not register codex FINALIZE PRs with review-monitor: that automation can invoke another model provider, push to the PR branch and arm auto-merge, and parity with claude-native is not an opt-in; review-monitor's own discovery (.claude/scripts/review_monitor_lib/discovery.py::cmd_discover and Step 0.6 of .claude/commands/review-monitor.md) can still enrol them and its auto-fix can then act on the PR, tracked in #3940; post-ship CI on an armed PR is covered by src/cw/shipped_pr_signal.py::scan_shipped_red_prs and cw dev-queue recover-red-pr; recovery needs impl and review in the lane pipeline and a claude-native or codex IMPL backend (src/cw/dev_queue/red_pr_recovery.py::red_pr_refusal), so a lane with an opencode or local IMPL backend can be paged but not recovered that way; paging is off when shipped_red_signal_enabled is false (src/cw/dispatch/loop.py); a per-client or per-lane opt-in is a separate operator decision, not built here"}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   ship-it.run-finalize-verification:

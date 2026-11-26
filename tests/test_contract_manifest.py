@@ -1065,9 +1065,10 @@ _CLEAN_BODY_REF = CodeRef(
 _CODEX_STAGE_TICKETS: dict[str, int] = {}
 #: The C3 ticket (#3062, codex FINALIZE executor); no cell may defer to it once
 #: it lands. Its finalize-stage cells are implemented,
-#: not-applicable, or deferred to one of its three follow-ups.
+#: not-applicable, or deferred to one of its follow-ups. #3544 closed its two
+#: deferred cells, so no codex finalize cell defers to a follow-up now.
 _C3_TICKET = 3062
-_CODEX_FINALIZE_FOLLOW_UPS = frozenset({3544})
+_CODEX_FINALIZE_FOLLOW_UPS: frozenset[int] = frozenset()
 #: The C1 ticket (#3060, codex PLAN executor); no cell may defer to it once it
 #: lands. Its plan-stage cells are implemented, not-applicable,
 #: or deferred to one of its follow-ups: #3912 (the Stage-0 dependency check) and
@@ -1810,6 +1811,10 @@ _C3_CODE_CELLS = {
         "src/cw/stage_verification/finalize_result.py",
         "finalize_blocked",
     ),
+    "finalize.post-ship-pipeline-bookkeeping": (
+        "src/cw/codex_finalize/_run.py",
+        "_arm_and_ship",
+    ),
     "finalize.post-to-linear": (
         "src/cw/codex_finalize/_post.py",
         "post_pr_link_comment",
@@ -1932,7 +1937,7 @@ _C3_CODE_CELLS = {
 
 
 def test_codex_finalize_code_cell_table_is_exactly_the_code_cells() -> None:
-    """The 47 implemented codex finalize code cells, no others."""
+    """The 48 implemented codex finalize code cells, no others."""
     code_cells = {
         element_id
         for element_id, element in _manifest().elements.items()
@@ -1943,9 +1948,9 @@ def test_codex_finalize_code_cell_table_is_exactly_the_code_cells() -> None:
         )
     }
     assert code_cells == set(_C3_CODE_CELLS)
-    assert len(_C3_CODE_CELLS) == 47
+    assert len(_C3_CODE_CELLS) == 48
     implemented = set(elements_with(CODEX_BACKEND, "implemented"))
-    assert len(implemented & set(_C3_CODE_CELLS)) == 47
+    assert len(implemented & set(_C3_CODE_CELLS)) == 48
 
 
 @pytest.mark.parametrize("element_id", sorted(_C3_CODE_CELLS))
@@ -1969,7 +1974,16 @@ def test_codex_finalize_follow_up_cells_cover_the_follow_up_tickets() -> None:
         if isinstance(cell, DeferredDisposition):
             by_ticket[cell.ref.number] = by_ticket.get(cell.ref.number, 0) + 1
     assert set(by_ticket) == _CODEX_FINALIZE_FOLLOW_UPS
-    assert sum(by_ticket.values()) == 2
+    assert sum(by_ticket.values()) == 0
+
+
+def test_no_codex_cell_defers_to_3544() -> None:
+    for element_id, element in _manifest().elements.items():
+        cell = element.cells[CODEX_BACKEND]
+        if isinstance(cell, DeferredDisposition):
+            assert cell.ref.number != 3544, element_id
+        elif not isinstance(cell, str):
+            assert "3544" not in getattr(cell, "reason", ""), element_id
 
 
 def test_no_codex_cell_defers_to_3542() -> None:
@@ -2012,6 +2026,11 @@ def test_codex_prep_pr_and_ship_it_cells_are_not_applicable() -> None:
     for element_id in ids:
         cell = _real_cell(element_id, CODEX_BACKEND)
         assert isinstance(cell, NotApplicableDisposition), element_id
+        if element_id == "ship-it.register-pr-monitor":
+            # cw does not do this step on codex, so the "cw does this in
+            # Python" phrase would be false here.
+            assert "cw does not register codex FINALIZE PRs" in cell.reason
+            continue
         assert "cw does this in Python" in cell.reason, element_id
     gates = _real_cell("prep-pr.run-quality-gates", CODEX_BACKEND)
     assert isinstance(gates, NotApplicableDisposition)
@@ -2040,9 +2059,8 @@ def test_codex_finalize_cell_counts() -> None:
             assert not isinstance(cell, str), element_id
             counts[cell.disposition] = counts.get(cell.disposition, 0) + 1
     assert counts == {
-        "implemented": 47,
-        "not-applicable": 42,
-        "deferred": 2,
+        "implemented": 48,
+        "not-applicable": 43,
     }
 
 
@@ -2517,3 +2535,67 @@ def test_finalize_base_resolution_sits_outside_every_range() -> None:
             assert not open_range
             seen = True
     assert seen
+
+
+def test_the_pr_monitor_cell_says_cw_does_not_register_codex_prs() -> None:
+    cell = _real_cell("ship-it.register-pr-monitor", CODEX_BACKEND)
+    assert isinstance(cell, NotApplicableDisposition)
+    for needle in (
+        "cw does not register codex FINALIZE PRs",
+        "another model provider",
+        "push to the PR branch",
+        "arm auto-merge",
+        "not an opt-in",
+        "discovery.py::cmd_discover",
+        "Step 0.6",
+        "can still enrol",
+        "#3940",
+        "shipped_pr_signal.py::scan_shipped_red_prs",
+        "recover-red-pr",
+        "separate operator decision",
+    ):
+        assert needle in cell.reason, needle
+    assert "cw does this in Python" not in cell.reason
+    assert "3544" not in cell.reason
+
+
+def test_the_ci_wait_cell_names_the_red_pr_recovery() -> None:
+    cell = _real_cell("finalize.wait-for-ci", CODEX_BACKEND)
+    assert isinstance(cell, NotApplicableDisposition)
+    for needle in (
+        "scan_shipped_red_prs",
+        "pages only when",
+        "auto-merge-ARMED",
+        "failing required check",
+        "unarmed",
+        "never paged",
+        "prepare_red_pr_recovery",
+        "recover-red-pr",
+    ):
+        assert needle in cell.reason, needle
+
+
+@pytest.mark.parametrize(
+    "element_id",
+    ["finalize.wait-for-ci", "finalize.fix-ci-failure", "ship-it.register-pr-monitor"],
+)
+def test_the_recovery_cells_name_the_preconditions(element_id: str) -> None:
+    cell = _real_cell(element_id, CODEX_BACKEND)
+    assert isinstance(cell, NotApplicableDisposition)
+    for needle in (
+        "red_pr_refusal",
+        "impl and review in the lane pipeline",
+        "claude-native or codex IMPL backend",
+        "opencode or local",
+        "paged but not recovered",
+        "shipped_red_signal_enabled",
+    ):
+        assert needle in cell.reason, needle
+
+
+def test_the_post_ship_cell_names_what_it_does_not_carry() -> None:
+    cell = _real_cell("finalize.post-ship-pipeline-bookkeeping", CODEX_BACKEND)
+    assert isinstance(cell, ImplementedDisposition)
+    assert cell.note is not None
+    for needle in ("post_pr_link_comment", "#3938", "#3939"):
+        assert needle in cell.note, needle
