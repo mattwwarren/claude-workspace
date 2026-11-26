@@ -399,9 +399,7 @@ def gate_worktree(
     try:
         yield Path(path)
     finally:
-        run_git(
-            ["worktree", "remove", "--force", path], cwd=worktree, capture_output=True
-        )
+        # Removing the directory and pruning is ``worktree remove --force``.
         _remove_dir(path, ticket, "impl_gate4_worktree_leftover")
         run_git(["worktree", "prune"], cwd=worktree, capture_output=True)
 

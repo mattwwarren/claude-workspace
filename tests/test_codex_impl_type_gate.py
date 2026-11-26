@@ -30,6 +30,7 @@ from cw.stage_verification.impl_type_gate import (
     LAUNCHER_UNSUPPORTED_PREFIX,
     MYPY_NOT_DECLARED_FRICTION,
     NO_BASELINE_RULE,
+    RECORD_FAILED_FRICTION,
     RUFF_NOT_DECLARED_FRICTION,
     SKIPPED_NO_GATE_FRICTION,
     UNTOUCHED_ONLY_PREFIX,
@@ -648,6 +649,24 @@ def test_baselined_errors_are_recorded_and_do_not_block(
     assert len(baseline_runs) == 2  # the repo gate, then gate 4's run
     assert [*_GATE4_MYPY_ARGV, WIDGET] in uv.calls
     _assert_no_gate_dirs(gate_root, h)
+
+
+def test_a_record_run_with_nothing_parseable_adds_friction(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    gate_root: Path,
+) -> None:
+    h = harness(gates=(BASELINE_GATE,))
+    _seed_main(h, BASELINE_FILE, "old entry\n")
+    _uv(tmp_path, monkeypatch, {GATE4_MYPY: GhReply(2, _USAGE)})
+    h.turn()
+
+    result = h.run()
+
+    assert result.status == "stage_complete", _details(result)
+    assert RECORD_FAILED_FRICTION in result.friction_highlights
+    assert not (h.worktree / DEFERRED_FINDINGS_RELATIVE_PATH).exists()
 
 
 def test_a_malformed_deferred_artifact_is_left_untouched_with_friction(
