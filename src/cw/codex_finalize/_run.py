@@ -352,8 +352,6 @@ def _document(
 
 def _pr_body(doc: FinalizeTurnDocument, state: _State) -> str:
     body = doc.pr_body.rstrip()
-    if doc.adjudication_section.strip():
-        body += "\n\n" + doc.adjudication_section.strip()
     if state.override_json is not None:
         body = apply_body_section(
             body, doc.override_section or state.override_json, heading=OVERRIDE_HEADING

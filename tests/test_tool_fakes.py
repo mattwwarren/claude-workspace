@@ -992,9 +992,9 @@ class TestScriptedCodexRunner:
 class TestFinalizeFakes:
     """The codex FINALIZE executor's shared fakes (#3062)."""
 
-    _FIELDS = ("pr_title", "pr_body", "adjudication_section", "override_section")
+    _FIELDS = ("pr_title", "pr_body", "override_section")
 
-    def test_finalize_document_is_the_strict_four_field_object(self) -> None:
+    def test_finalize_document_is_the_strict_three_field_object(self) -> None:
         doc = json.loads(finalize_document())
 
         assert tuple(doc) == self._FIELDS

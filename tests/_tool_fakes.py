@@ -1715,7 +1715,7 @@ def argv_has(*tokens: str) -> CodexMatcher:
 
 
 def finalize_document(**overrides: object) -> str:
-    """The FINALIZE turn's strict four-field ``-o`` document, as JSON text.
+    """The FINALIZE turn's strict three-field ``-o`` document, as JSON text.
 
     The defaults are a valid document; *overrides* replace fields (an extra
     key builds the strict-schema violation).
@@ -1723,7 +1723,6 @@ def finalize_document(**overrides: object) -> str:
     document: dict[str, object] = {
         "pr_title": "Add the widget",
         "pr_body": "## Summary\n\nAdds the widget.\n",
-        "adjudication_section": "",
         "override_section": "",
     }
     document.update(overrides)

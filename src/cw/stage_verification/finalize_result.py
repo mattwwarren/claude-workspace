@@ -1,8 +1,9 @@
 """The FINALIZE turn's document, cw's blocks, and the cw-built results (#3062).
 
 cw, never the model, emits the FINALIZE sentinel (RFC 0018 C3 R10): the turn
-returns a strict four-field document (PR title, PR body, adjudication section
-text and operator-override section text) and nothing else. Every result is
+returns a strict three-field document (PR title, PR body and operator-override
+section text) and nothing else; cw copies the adjudication section from the
+deferred-findings artifact (#3543). Every result is
 built here from cw's own measurements: ``schema_version``, ``ticket_id``,
 ``stage_reached``, ``worktree_path``, ``branch``, ``fork_point_sha``,
 ``commits`` (``local_runner.git_facts``; ``stamp_stage_facts`` is not used),
@@ -62,6 +63,10 @@ OPERATOR_UNAVAILABLE: Final = "operator_unavailable"
 PRIOR_PIPELINE_PR_OPEN: Final = "prior_pipeline_pr_open"
 PUSH_AUTH_FAILED: Final = "push_auth_failed"
 IMPL_NOT_PUSHED: Final = "impl_not_pushed"
+REVIEW_DEBT_UNFILED: Final = "review_debt_unfiled"
+
+#: The ``blocker.stage`` of a review-debt re-file failure (the doc's label).
+STAGE4_REVIEW_DEBT: Final = "stage4_review_debt"
 
 #: The park reason for a PR left unarmed while mapped CI checks are not green
 #: (#3618); restated as a literal in ``cw.auto_dev_result.schema._vocab`` and
@@ -75,6 +80,13 @@ STAGE4_MUST_FIX_OVERRIDE: Final = "stage4_must_fix_override"
 REQUEUE_STAGE_REVIEW: Final = "requeue_stage_review"
 REQUEUE_STAGE_FINALIZE: Final = "requeue_stage_finalize"
 WAIT_FOR_CI: Final = "wait_for_ci"
+#: ``next_actions`` of a shipped result whose UI-evidence gate held the arm
+#: (unarmed PR) or fired on an already-armed PR (#3543).
+ATTACH_UI_EVIDENCE_AND_ARM: Final = "attach_ui_evidence_and_enable_automerge"
+ATTACH_UI_EVIDENCE: Final = "attach_ui_evidence"
+#: Friction when the UI gate fired on a PR that is already armed: cw never
+#: disarms, so the result reports the PR as it is.
+UI_EVIDENCE_ON_ARMED_PR: Final = "ui_evidence_missing_on_armed_pr"
 
 #: The PR title's maximum length (``/prep-pr``'s title rule).
 PR_TITLE_MAX_CHARS: Final = 72
@@ -103,7 +115,6 @@ class FinalizeTurnDocument(BaseModel):
 
     pr_title: str
     pr_body: str
-    adjudication_section: str
     override_section: str
 
 
@@ -154,7 +165,7 @@ def parse_finalize_turn(content: str | None) -> FinalizeTurnDocument | FinalizeB
     except ValidationError as exc:
         return FinalizeBlock(
             BLOCKER_REASON_NO_RESULT_EMITTED,
-            f"the -o document is not the four-field FINALIZE object: {exc}",
+            f"the -o document is not the three-field FINALIZE object: {exc}",
         )
     if not document.pr_title.strip():
         return FinalizeBlock(
@@ -296,8 +307,9 @@ def finalize_shipped(
     pr_url: str,
     auto_merge: bool,
     base: str,
+    extra_actions: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    """The ``shipped`` result: a verified ``pr`` and ``wait_for_ci``."""
+    """The ``shipped`` result: a verified ``pr``, ``wait_for_ci``, *extra_actions*."""
     payload = _base(facts, status="shipped", stage=STAGE5_POST_CREATE)
     payload["pr"] = {
         "number": pr_number,
@@ -305,7 +317,7 @@ def finalize_shipped(
         "auto_merge": auto_merge,
         "base": base,
     }
-    payload["next_actions"] = [WAIT_FOR_CI]
+    payload["next_actions"] = [WAIT_FOR_CI, *extra_actions]
     return AutoDevResult.model_validate(payload).model_dump(mode="json")
 
 

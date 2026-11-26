@@ -538,24 +538,6 @@ def test_the_turn_is_read_only_and_has_no_timeout(
     assert call["cwd"] == h.worktree
 
 
-def test_a_document_with_an_adjudication_section_lands_in_the_pr_body(
-    harness: Callable[..., Harness],
-) -> None:
-    h = harness()
-    h.turn(
-        finalize_document(
-            pr_title=TITLE,
-            pr_body=BODY,
-            adjudication_section="## Review adjudication\n\nAll clear.\n",
-        )
-    )
-    h.run()
-    (call,) = h.created()
-    assert (
-        call.body_file == BODY.rstrip() + "\n\n## Review adjudication\n\nAll clear.\n"
-    )
-
-
 def test_a_free_text_title_gets_no_ticket_suffix(
     harness: Callable[..., Harness],
 ) -> None:

@@ -11,7 +11,7 @@ Fixed choices:
 
 * ``--json`` + ``--ephemeral``: the JSONL event stream (model-capacity
   detection reads it) and no resumable session file.
-* ``--output-schema`` / ``-o``: the strict four-field document, in a uuid
+* ``--output-schema`` / ``-o``: the strict three-field document, in a uuid
   scratch directory the driver owns.
 * MCP: every declared server is disabled. cw supplies the ticket, the plan,
   the review artifacts and the branch facts in the prompt.
