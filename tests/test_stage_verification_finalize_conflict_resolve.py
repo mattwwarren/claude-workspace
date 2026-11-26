@@ -799,7 +799,8 @@ def _raise_after(
             return real_run_git(argv, **kwargs)
         if argv[0] != "commit":
             real_run_git(argv, **kwargs)
-        raise subprocess.TimeoutExpired(["git", *argv], 60)
+        child = f"git {argv[0]}"
+        raise subprocess.TimeoutExpired(child, 60)
 
     monkeypatch.setattr(resolve, "run_git", _die)
 
