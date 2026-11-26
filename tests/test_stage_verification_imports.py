@@ -56,6 +56,7 @@ _EXPECTED_MODULES = frozenset(
         "impl_regress_ledger",
         "impl_resume",
         "impl_staleness",
+        "impl_type_gate",
         "plan_gates",
         "posted_text",
         "push",
@@ -91,6 +92,7 @@ _REMAINING_CODEX_MODULES = {
         "_result",
         "_resume",
         "_run",
+        "_type_gate",
     },
     "cw.codex_plan": {
         "__init__",
@@ -211,7 +213,7 @@ def _package_modules() -> list[Path]:
 def test_module_set_is_pinned() -> None:
     names = {_short_name(p, _PACKAGE) for p in _package_modules()}
     assert names == _EXPECTED_MODULES
-    assert len(names) == 23
+    assert len(names) == 24
 
 
 @pytest.mark.parametrize("path", _package_modules(), ids=lambda p: p.stem)

@@ -54,6 +54,7 @@ from tests._tool_fakes import (
     gh_calls,
     path_with_stub,
     prepend_to_path,
+    read_calls,
     restore_real_run,
     shim_env,
     station_findings_doc,
@@ -66,6 +67,7 @@ from tests._tool_fakes import (
     stub_gh_issue_list,
     stub_gh_recording,
     stub_prep_pr_finalize,
+    stub_uv_by_cwd,
     write_bin_stub,
 )
 
@@ -112,6 +114,7 @@ _SHARED_NAMES = frozenset(
         "finalize_turn_result",
         "stub_prep_pr_finalize",
         "stub_cw_cli",
+        "stub_uv_by_cwd",
         "_finalize_document",
         "_finalize_turn_result",
         "_stub_prep_pr_finalize",
@@ -386,6 +389,55 @@ class TestRecordingShim:
         assert _run(["pre-commit", "run"], hooks.env()).returncode == 1
         assert uv.calls == [["lock", "--check"]]
         assert hooks.calls == [["run"]]
+
+    def test_uv_shim_replies_per_argv_prefix(self, tmp_path: Path) -> None:
+        uv = fake_uv_cli(
+            tmp_path,
+            responses={"run mypy --no-pretty": GhReply(returncode=1, stdout="bad\n")},
+        )
+
+        gate = _run(["uv", "run", "mypy", "--no-pretty", "a.py"], uv.env())
+        repo = _run(["uv", "run", "mypy", "src/"], uv.env())
+
+        assert (gate.returncode, gate.stdout) == (1, "bad\n")
+        assert repo.returncode == 0
+        assert uv.calls == [
+            ["run", "mypy", "--no-pretty", "a.py"],
+            ["run", "mypy", "src/"],
+        ]
+
+    def test_uv_by_cwd_replies_by_working_directory(self, tmp_path: Path) -> None:
+        bin_dir = stub_uv_by_cwd(
+            tmp_path,
+            in_gate_worktree=GhReply(returncode=3, stdout="gate\n", stderr="e"),
+            touch_in_gate_worktree="made.txt",
+        )
+        gate_wt = tmp_path / "root" / "cw-gate-wt-impl-abc"
+        gate_wt.mkdir(parents=True)
+        env = shim_env(bin_dir)
+
+        inside = subprocess.run(
+            ["uv", "run", "x"],
+            env=env,
+            cwd=gate_wt,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        outside = subprocess.run(
+            ["uv", "run", "y"],
+            env=env,
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert (inside.returncode, inside.stdout, inside.stderr) == (3, "gate\n", "e")
+        assert (gate_wt / "made.txt").is_file()
+        assert (outside.returncode, outside.stdout) == (0, "")
+        assert not (tmp_path / "made.txt").exists()
+        assert read_calls(bin_dir, "uv.calls") == [["run", "x"], ["run", "y"]]
 
 
 class TestInProcessGhFakes:

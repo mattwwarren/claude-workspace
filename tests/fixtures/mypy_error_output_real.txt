@@ -1,0 +1,11 @@
+Using CPython 3.13.14
+Creating virtual environment at: /redacted/repo/.venv
+   Building claude-workspace @ file:///redacted/repo
+      Built claude-workspace @ file:///redacted/repo
+Installed 53 packages in 3.10s
+pkg/helper.py:2: error: Incompatible return value type (got "int", expected "str")  [return-value]
+pkg/helper.py:5: error: Incompatible types in assignment (expression has type "str", variable has type "int")  [assignment]
+main.py:5: error: Incompatible types in assignment (expression has type "str", variable has type "int")  [assignment]
+main.py:6: error: "int" has no attribute "missing"  [attr-defined]
+main.py:7: note: Revealed type is "int"
+Found 4 errors in 2 files (checked 1 source file)

@@ -428,12 +428,17 @@ def test_impl_addendum_overrides_the_remaining_claude_machinery() -> None:
     assert "leave them alone" in addendum
     assert "Auto-Dev-Stage: impl-complete" in addendum
     assert "{trailer}" not in addendum
-    assert "is deferred" in addendum or "are deferred" in addendum
-    # #3529: the re-entry machinery is cw-run; only #3531's gates stay deferred.
     assert "branch freshness and the merge-conclusion guard are run by cw" in addendum
-    assert "The claimed-test re-run and the mypy-baseline comparison are deferred" in (
-        addendum
-    )
+    # #3531: gate 3 does not apply, gate 4 is cw-run, and nothing is deferred.
+    for needle in (
+        "The claimed-test re-run does not apply",
+        "The Completion Artifacts block is not needed",
+        "through `uv run`",
+        "cw skips its own mypy check",
+        "Never add an entry to a mypy baseline file",
+    ):
+        assert needle in addendum, needle
+    assert "deferred" not in addendum
     assert "resume note for a branch that already carries work" in addendum
 
 
@@ -448,6 +453,7 @@ def test_impl_golden_drops_the_cw_run_blocks() -> None:
         assert dropped not in text, dropped
     assert "### Review-feedback guard" in text
     assert "### S2 Completion Marker" in text
+    assert "## Completion Artifacts" not in text
 
 
 def test_every_range_body_is_denylist_clean() -> None:

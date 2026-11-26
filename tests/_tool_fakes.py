@@ -27,7 +27,8 @@ not one class:
 ``opencode``, ``uv``, ``pre-commit``
     :func:`fake_opencode_cli`, :func:`fake_uv_cli` and
     :func:`fake_pre_commit_cli`, recording shims built on
-    :class:`RecordingShim`.
+    :class:`RecordingShim`, plus :func:`stub_uv_by_cwd` (a ``uv`` shim that
+    replies by its working directory, for codex IMPL gate 4).
 
 A shim lives in ``tmp_path/bin``, inside the test root, so the launch guard
 lets it run by bare name once its directory leads ``PATH``. Put it there with
@@ -82,6 +83,7 @@ _Completed = subprocess.CompletedProcess[str] | subprocess.CompletedProcess[byte
 __all__ = [
     "ARM_VIEW_ARMED",
     "ARM_VIEW_OPEN",
+    "GATE_WORKTREE_GLOB",
     "GH_ARG_SEPARATOR",
     "GH_CALLS_FILE",
     "GH_UNAUTHENTICATED",
@@ -132,6 +134,7 @@ __all__ = [
     "stub_gh_issue_list",
     "stub_gh_recording",
     "stub_prep_pr_finalize",
+    "stub_uv_by_cwd",
     "tracker_io_refresh_result",
     "tracker_io_turn_result",
     "write_bin_stub",
@@ -618,9 +621,63 @@ def fake_opencode_cli(
     )
 
 
-def fake_uv_cli(tmp_path: Path, *, default: GhReply | None = None) -> RecordingShim:
-    """A ``uv`` shim that records argv and exits per *default* (0)."""
-    return RecordingShim(tmp_path, "uv", default=default)
+def fake_uv_cli(
+    tmp_path: Path,
+    *,
+    default: GhReply | None = None,
+    responses: Mapping[str, GhReply] | None = None,
+) -> RecordingShim:
+    """A ``uv`` shim that records argv and replies per *responses*, else *default*.
+
+    *responses* maps an argv prefix (``"run mypy --no-pretty"``) to its reply,
+    as :class:`RecordingShim` does; unmatched calls exit per *default* (0).
+    """
+    return RecordingShim(tmp_path, "uv", responses=responses, default=default)
+
+
+#: The ``$PWD`` pattern :func:`stub_uv_by_cwd` treats as codex IMPL's gate worktree.
+GATE_WORKTREE_GLOB = "*/cw-gate-wt-impl-*"
+
+
+def _uv_reply_arm(fake_bin: Path, tag: str, reply: GhReply, touch: str | None) -> str:
+    (fake_bin / f"uv.{tag}.out").write_text(reply.stdout, encoding="utf-8")
+    (fake_bin / f"uv.{tag}.err").write_text(reply.stderr, encoding="utf-8")
+    touch_line = f': > "{touch}"; ' if touch is not None else ""
+    return (
+        f'{touch_line}cat "$DIR/uv.{tag}.out"; cat "$DIR/uv.{tag}.err" >&2;'
+        f" exit {reply.returncode}"
+    )
+
+
+def stub_uv_by_cwd(
+    tmp_path: Path,
+    *,
+    in_gate_worktree: GhReply,
+    elsewhere: GhReply | None = None,
+    touch_in_gate_worktree: str | None = None,
+) -> Path:
+    """A recording ``uv`` shim whose reply depends on its working directory.
+
+    Inside a codex IMPL gate worktree (``$PWD`` matching
+    :data:`GATE_WORKTREE_GLOB`) it replies *in_gate_worktree* (first creating
+    *touch_in_gate_worktree*, a path relative to ``$PWD``, when given); anywhere
+    else *elsewhere* (exit 0). Argv is logged to ``uv.calls`` beside it (read
+    with :func:`read_calls`). Returns the bin dir.
+    """
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(exist_ok=True)
+    lines = [
+        "#!/bin/sh",
+        'DIR=$(dirname "$0")',
+        *(line.format(calls="uv.calls") for line in _RECORD_ARGV_LINES),
+        'case "$PWD" in',
+        f"  {GATE_WORKTREE_GLOB}) "
+        + _uv_reply_arm(fake_bin, "gate", in_gate_worktree, touch_in_gate_worktree)
+        + ";;",
+        "  *) " + _uv_reply_arm(fake_bin, "other", elsewhere or GhReply(), None) + ";;",
+        "esac",
+    ]
+    return write_bin_stub(tmp_path, "uv", "\n".join(lines) + "\n")
 
 
 def fake_pre_commit_cli(
