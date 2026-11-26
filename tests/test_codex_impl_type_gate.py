@@ -533,6 +533,77 @@ def test_a_wrapper_declared_gate_skips_with_friction(
     assert uv.calls == []
 
 
+def test_gate4_repeats_the_declaring_gates_uv_options(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    gate_root: Path,
+) -> None:
+    h = harness(
+        gates=(
+            ("ruff", "uv run --extra dev ruff check src/", 5.0),
+            ("mypy", "uv run --extra dev mypy src/", 5.0),
+        )
+    )
+    uv = _uv(tmp_path, monkeypatch)
+    h.turn()
+
+    result = h.run()
+
+    assert result.status == "stage_complete", _details(result)
+    options = ["run", "--extra", "dev"]
+    assert [*options, "ruff", "check", "--force-exclude", WIDGET] in uv.calls
+    assert [*options, *_GATE4_MYPY_ARGV[1:], WIDGET] in uv.calls
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "true || cd sub && uv run mypy .",
+        "uv run --directory backend mypy .",
+    ],
+    ids=["cd", "directory"],
+)
+def test_a_gate_cw_cannot_reproduce_is_skipped_not_run_at_the_root(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    gate_root: Path,
+    command: str,
+) -> None:
+    h = harness(gates=(("mypy", command, 5.0),))
+    uv = _uv(tmp_path, monkeypatch)
+    h.turn()
+
+    result = h.run()
+
+    assert result.status == "stage_complete", _details(result)
+    assert f"{LAUNCHER_UNSUPPORTED_PREFIX}mypy" in result.friction_highlights
+    assert _gate4_calls(uv.calls) == []
+    _assert_no_gate_dirs(gate_root, h)
+
+
+def test_an_unreproducible_baseline_consumer_runs_verbatim_without_a_record(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    gate_root: Path,
+) -> None:
+    command = f"uv run --directory . mypy src/ --baseline-file {BASELINE_FILE}"
+    h = harness(gates=(("mypy", command, 5.0),))
+    _seed_main(h, BASELINE_FILE, "old entry\n")
+    uv = _uv(tmp_path, monkeypatch)
+    h.turn()
+
+    result = h.run()
+
+    assert result.status == "stage_complete", _details(result)
+    verbatim = ["run", "--directory", ".", "mypy", "src/", "--baseline-file"]
+    assert uv.calls.count([*verbatim, BASELINE_FILE]) == 2  # the gate, then gate 4
+    assert [c for c in uv.calls if "--no-pretty" in c] == []
+    assert f"{LAUNCHER_UNSUPPORTED_PREFIX}mypy" in result.friction_highlights
+
+
 # -- the baseline ------------------------------------------------------------------
 
 

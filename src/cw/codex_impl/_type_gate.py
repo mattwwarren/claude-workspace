@@ -4,12 +4,14 @@
 cw's one commit, in a detached temporary worktree at a dangling snapshot
 commit of the staged tree. Applicability comes from the gate commands pinned
 before the turn: a tool is checked only when a declared gate runs it through
-``uv run``. Every command is a single-gate plan handed to
-:func:`cw.codex_fix_loop.gates.run_cycle_gates`, so it gets the scrubbed env,
-a private ``TMPDIR``, redaction and the signal-only ceiling (ADR-0014: no
-timeout). Each command's whole output goes to a file through a shell redirect,
-because the gate runner keeps only a capped tail. The pieces that are not
-codex-specific live in :mod:`cw.stage_verification.impl_type_gate`.
+``uv run``, with that gate's environment options, and only when cw can
+reproduce the gate's command at the repo root. Every command is a single-gate
+plan handed to :func:`cw.codex_fix_loop.gates.run_cycle_gates`, so it gets the
+scrubbed env, a private ``TMPDIR``, redaction and the signal-only ceiling
+(ADR-0014: no timeout). Each command's whole output goes to a file through a
+shell redirect, because the gate runner keeps only a capped tail. The pieces
+that are not codex-specific live in
+:mod:`cw.stage_verification.impl_type_gate`.
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ from cw.stage_verification.impl_type_gate import (
     SKIPPED_NO_GATE_FRICTION,
     UNTOUCHED_ONLY_PREFIX,
     MypyBaseline,
+    UvRun,
     VerdictKind,
     baseline_command_block,
     baseline_growth,
@@ -115,15 +118,22 @@ class _State:
 
 @dataclass(frozen=True)
 class _Steps:
-    """Which checks run: ruff, plain mypy, and the baseline commands (in order)."""
+    """Which checks run: ruff, plain mypy, and the baseline commands (in order).
 
-    ruff: bool = False
-    plain_mypy: bool = False
+    ``ruff``, ``plain_mypy`` and ``record`` hold the ``uv run`` options of cw's
+    own command; ``None`` means that command does not run.
+    """
+
+    ruff: tuple[str, ...] | None = None
+    plain_mypy: tuple[str, ...] | None = None
     baseline: tuple[str, ...] = ()
+    record: tuple[str, ...] | None = None
 
     @property
     def any(self) -> bool:
-        return self.ruff or self.plain_mypy or bool(self.baseline)
+        return (
+            self.ruff is not None or self.plain_mypy is not None or bool(self.baseline)
+        )
 
 
 @dataclass(frozen=True)
@@ -178,43 +188,54 @@ def _growth(run: _Run, state: _State) -> ImplBlock | None:
     return None
 
 
-def _tool_on(
+def _skipped(launch: Launch | None, tool: str, not_declared: str) -> str:
+    """The friction token for a tool cw does not check."""
+    return not_declared if launch is None else f"{LAUNCHER_UNSUPPORTED_PREFIX}{tool}"
+
+
+def _options_for(
     launch: Launch | None, tool: str, tokens: list[str], not_declared: str
-) -> bool:
-    """Whether *tool*'s check runs; adds the skip friction when it does not."""
-    if launch == "uv":
-        return True
-    tokens.append(
-        not_declared if launch is None else f"{LAUNCHER_UNSUPPORTED_PREFIX}{tool}"
-    )
-    return False
+) -> tuple[str, ...] | None:
+    """The ``uv run`` options for cw's *tool* command, or ``None`` with friction."""
+    if isinstance(launch, UvRun) and launch.options is not None:
+        return launch.options
+    tokens.append(_skipped(launch, tool, not_declared))
+    return None
 
 
 def _baseline_steps(
-    baseline: MypyBaseline, declared: _Declared, tokens: list[str]
-) -> tuple[str, ...]:
-    """The detected or consumer-unknown baseline's mypy commands (maybe none)."""
+    baseline: MypyBaseline,
+    declared: _Declared,
+    tokens: list[str],
+    ruff: tuple[str, ...] | None,
+) -> _Steps:
+    """The detected or consumer-unknown baseline's steps.
+
+    The baseline commands run verbatim, so any ``uv run`` consumer will do;
+    the debt record is cw's own command and needs a reproducible one.
+    """
     files = listed_files(baseline.files)
     if not baseline.commands:
         tokens.append(f"{CONSUMER_UNKNOWN_PREFIX}{files}")
-        return ()
+        return _Steps(ruff=ruff)
     shown = "; ".join(postable_command(command) for command in baseline.commands)
     tokens.append(f"{BASELINE_FRICTION_PREFIX}file={files} cmd={shown}")
-    if _tool_on(declared.consumer, BASELINE_TOOL, tokens, MYPY_NOT_DECLARED_FRICTION):
-        return baseline.commands
-    return ()
+    consumer = declared.consumer
+    if not isinstance(consumer, UvRun):
+        tokens.append(_skipped(consumer, BASELINE_TOOL, MYPY_NOT_DECLARED_FRICTION))
+        return _Steps(ruff=ruff)
+    record = _options_for(consumer, MYPY, tokens, MYPY_NOT_DECLARED_FRICTION)
+    return _Steps(ruff=ruff, baseline=baseline.commands, record=record)
 
 
 def _steps(declared: _Declared, state: _State, tokens: list[str]) -> _Steps:
     """The checks to run; no touched Python file runs none."""
     if not state.files:
         return _Steps()
-    ruff = _tool_on(declared.ruff, RUFF, tokens, RUFF_NOT_DECLARED_FRICTION)
+    ruff = _options_for(declared.ruff, RUFF, tokens, RUFF_NOT_DECLARED_FRICTION)
     if state.baseline is not None:
-        return _Steps(
-            ruff=ruff, baseline=_baseline_steps(state.baseline, declared, tokens)
-        )
-    plain = _tool_on(declared.mypy, MYPY, tokens, MYPY_NOT_DECLARED_FRICTION)
+        return _baseline_steps(state.baseline, declared, tokens, ruff)
+    plain = _options_for(declared.mypy, MYPY, tokens, MYPY_NOT_DECLARED_FRICTION)
     return _Steps(ruff=ruff, plain_mypy=plain)
 
 
@@ -265,8 +286,8 @@ def _run_one(ctx: _Ctx, label: str, command: str, ceiling_s: float) -> _Ran:
     return _Ran(exit_code=exit_code or 0, output=_read(out_file))
 
 
-def _mypy_command(files: Sequence[str]) -> str:
-    return shlex.join(["uv", "run", "mypy", *_MYPY_FLAGS, *path_args(files)])
+def _mypy_command(options: Sequence[str], files: Sequence[str]) -> str:
+    return shlex.join(["uv", "run", *options, "mypy", *_MYPY_FLAGS, *path_args(files)])
 
 
 def _run_prepare(ctx: _Ctx) -> ImplBlock | None:
@@ -286,11 +307,10 @@ def _run_prepare(ctx: _Ctx) -> ImplBlock | None:
     return None
 
 
-def _run_ruff(ctx: _Ctx) -> ImplBlock | None:
+def _run_ruff(ctx: _Ctx, options: Sequence[str]) -> ImplBlock | None:
     files = ctx.state.files
-    command = shlex.join(
-        ["uv", "run", "ruff", "check", "--force-exclude", *path_args(files)]
-    )
+    check = ["ruff", "check", "--force-exclude", *path_args(files)]
+    command = shlex.join(["uv", "run", *options, *check])
     ran = _run_one(ctx, _RUFF, command, _ceiling(ctx.flow, RUFF))
     if ran.why is not None:
         return unavailable_block(command, ran.why)
@@ -309,9 +329,9 @@ def _untouched_only(ctx: _Ctx, files: Sequence[str]) -> None:
     )
 
 
-def _run_plain_mypy(ctx: _Ctx) -> ImplBlock | None:
+def _run_plain_mypy(ctx: _Ctx, options: Sequence[str]) -> ImplBlock | None:
     files = ctx.state.files
-    command = _mypy_command(files)
+    command = _mypy_command(options, files)
     ran = _run_one(ctx, _MYPY, command, _ceiling(ctx.flow, MYPY))
     if ran.why is not None:
         return unavailable_block(command, ran.why)
@@ -325,10 +345,11 @@ def _run_plain_mypy(ctx: _Ctx) -> ImplBlock | None:
     return None
 
 
-def _record(ctx: _Ctx) -> None:
+def _record(ctx: _Ctx, options: Sequence[str]) -> None:
     """The baselined-debt record: never blocks, friction on any failure."""
     files = ctx.state.files
-    ran = _run_one(ctx, _RECORD, _mypy_command(files), _ceiling(ctx.flow, MYPY))
+    command = _mypy_command(options, files)
+    ran = _run_one(ctx, _RECORD, command, _ceiling(ctx.flow, MYPY))
     errors = parse_mypy_errors(ran.output, ctx.tmp) if ran.why is None else []
     if ran.why is not None or (ran.exit_code != 0 and not errors):
         ctx.flow.tokens.append(RECORD_FAILED_FRICTION)
@@ -337,9 +358,9 @@ def _record(ctx: _Ctx) -> None:
     ctx.flow.tokens.extend(record_baselined_errors(path, errors, files))
 
 
-def _run_baseline(ctx: _Ctx, commands: Sequence[str]) -> ImplBlock | None:
+def _run_baseline(ctx: _Ctx, steps: _Steps) -> ImplBlock | None:
     ceiling = _ceiling(ctx.flow, BASELINE_TOOL)
-    for index, command in enumerate(commands):
+    for index, command in enumerate(steps.baseline):
         ran = _run_one(ctx, f"{_BASELINE}-{index}", command, ceiling)
         if ran.why is not None:
             return unavailable_block(command, ran.why)
@@ -347,19 +368,20 @@ def _run_baseline(ctx: _Ctx, commands: Sequence[str]) -> ImplBlock | None:
             return baseline_command_block(
                 command, ran.exit_code, ran.output, ctx.state.fork, ctx.state.files
             )
-    _record(ctx)
+    if steps.record is not None:
+        _record(ctx, steps.record)
     return None
 
 
 def _execute(ctx: _Ctx, steps: _Steps) -> ImplBlock | None:
     """``tests.prepare``, then ruff, then mypy (plain or baseline); fail fast."""
     block = _run_prepare(ctx)
-    if block is None and steps.ruff:
-        block = _run_ruff(ctx)
-    if block is None and steps.plain_mypy:
-        block = _run_plain_mypy(ctx)
+    if block is None and steps.ruff is not None:
+        block = _run_ruff(ctx, steps.ruff)
+    if block is None and steps.plain_mypy is not None:
+        block = _run_plain_mypy(ctx, steps.plain_mypy)
     if block is None and steps.baseline:
-        block = _run_baseline(ctx, steps.baseline)
+        block = _run_baseline(ctx, steps)
     return block
 
 

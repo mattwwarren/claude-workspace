@@ -73,48 +73,104 @@ def _snap(repo: Path) -> str:
 
 # -- declaration and launcher --------------------------------------------------
 
+_UV = gate.UvRun(options=())
+_MCP = gate.UvRun(options=("--extra", "mcp"))
+_UNREPRODUCIBLE = gate.UvRun(options=None)
+
 
 @pytest.mark.parametrize(
     ("command", "tool", "declared", "launch"),
     [
-        ("uv run ruff format --check src/", "ruff", True, "uv"),
-        ("uv run mypy src/ | mypy-baseline filter", "mypy", True, "uv"),
+        ("uv run ruff format --check src/", "ruff", True, _UV),
+        ("uv run mypy src/ | mypy-baseline filter", "mypy", True, _UV),
         ("uv run mypy-baseline sync", "mypy", False, None),
-        ("uv run mypy-baseline filter", "mypy-baseline", True, "uv"),
+        ("uv run mypy-baseline filter", "mypy-baseline", True, _UV),
         (".venv/bin/mypy src/", "mypy", True, "other"),
         ("make lint", "ruff", False, None),
         ("make mypy", "mypy", False, None),
         ("uv run pre-commit run mypy --all-files", "mypy", False, None),
         ("uvx mypy src/", "mypy", True, "other"),
         ("mypy src/", "mypy", True, "other"),
-        ("uv run --extra mcp mypy --strict src/", "mypy", True, "uv"),
-        ("uv run python -m mypy src/", "mypy", True, "uv"),
-        ("ruff check . && uv run mypy src/", "mypy", True, "uv"),
+        ("uv run --extra mcp mypy --strict src/", "mypy", True, _MCP),
+        ("uv run python -m mypy src/", "mypy", True, _UV),
+        ("ruff check . && uv run mypy src/", "mypy", True, _UV),
         ("ruff check . && uv run mypy src/", "ruff", True, "other"),
         ("uv run pytest", "mypy", False, None),
-        ("uv run mypy --baseline-file .mypy/baseline.json src/", "mypy", True, "uv"),
+        ("uv run mypy --baseline-file .mypy/baseline.json src/", "mypy", True, _UV),
         ("cat .mypy/notes", "mypy", False, None),
         ("poetry run mypy src/", "mypy", True, "other"),
     ],
 )
 def test_declares_tool_and_tool_launch(
-    command: str, tool: str, declared: bool, launch: str | None
+    command: str, tool: str, declared: bool, launch: gate.Launch | None
 ) -> None:
     assert gate.declares_tool(command, tool) is declared
     assert gate.tool_launch(command, tool) == launch
 
 
-def test_launch_over_prefers_uv_then_other() -> None:
-    assert gate.launch_over(["mypy src/", "uv run mypy src/"], "mypy") == "uv"
+@pytest.mark.parametrize(
+    ("command", "options"),
+    [
+        ("uv run --extra dev mypy .", ("--extra", "dev")),
+        ("uv run --extra=dev mypy .", ("--extra=dev",)),
+        ("uv run --all-extras --all-groups mypy .", ("--all-extras", "--all-groups")),
+        (
+            "uv run --group lint --with=types-x --python 3.12 mypy .",
+            ("--group", "lint", "--with=types-x", "--python", "3.12"),
+        ),
+        ("uv run --env-file .env mypy .", ("--env-file", ".env")),
+        ("uv run --with mypy mypy .", ("--with", "mypy")),
+        ("uv run mypy --extra not-uv .", ()),
+        ("echo ok && uv run mypy .", ()),
+        ("FOO=1 true && uv run mypy .", ()),
+    ],
+)
+def test_tool_launch_carries_the_environment_options(
+    command: str, options: tuple[str, ...]
+) -> None:
+    assert gate.tool_launch(command, "mypy") == gate.UvRun(options=options)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd sub && uv run mypy .",
+        "(cd sub && uv run mypy .)",
+        "pushd sub; uv run mypy .",
+        "export UV_PROJECT=sub && uv run mypy .",
+        "UV_PROJECT=sub; uv run mypy .",
+        "UV_PROJECT=sub uv run mypy .",
+        "env MYPYPATH=stubs uv run mypy .",
+        "uv run --directory backend mypy .",
+        "uv run --directory=backend mypy .",
+        "uv run --project backend mypy .",
+        "uv run --package api mypy .",
+        "uv run --frozen mypy .",
+        "uv run --all-extras=yes mypy .",
+        "uv run --python $PYTHON mypy .",
+        "uv run --extra= mypy .",
+        # ``--with`` is the last token: there is no value to repeat.
+        "uv run --extra mypy --with",
+    ],
+)
+def test_a_command_cw_cannot_reproduce_has_no_options(command: str) -> None:
+    assert gate.tool_launch(command, "mypy") == _UNREPRODUCIBLE
+
+
+def test_launch_over_prefers_a_reproducible_uv_run_then_any_then_other() -> None:
+    moved = "cd sub && uv run mypy ."
+    assert gate.launch_over(["mypy src/", "uv run mypy src/"], "mypy") == _UV
+    assert gate.launch_over([moved, "uv run --extra mcp mypy ."], "mypy") == _MCP
+    assert gate.launch_over(["mypy src/", moved], "mypy") == _UNREPRODUCIBLE
     assert gate.launch_over(["mypy src/", "true"], "mypy") == "other"
     assert gate.launch_over(["true"], "mypy") is None
 
 
 def test_consumer_launch_judges_the_mypy_segment_else_the_consumer() -> None:
     piped = "uv run mypy src/ | mypy-baseline filter"
-    assert gate.consumer_launch([piped]) == "uv"
+    assert gate.consumer_launch([piped]) == _UV
     assert gate.consumer_launch(["mypy src/ | uv run mypy-baseline filter"]) == "other"
-    assert gate.consumer_launch(["cat out | uv run mypy-baseline filter"]) == "uv"
+    assert gate.consumer_launch(["cat out | uv run mypy-baseline filter"]) == _UV
     assert gate.consumer_launch(["uv run mypy src/"]) is None
 
 

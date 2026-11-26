@@ -53,7 +53,7 @@ from cw.stage_verification.posted_text import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Iterator, Sequence
+    from collections.abc import Collection, Iterable, Iterator, Sequence
 
 _log = logging.getLogger(__name__)
 
@@ -79,9 +79,6 @@ RUFF: Final = "ruff"
 MYPY: Final = "mypy"
 BASELINE_TOOL: Final = "mypy-baseline"
 
-#: How a declaring segment launches a tool: through ``uv run``, or otherwise.
-Launch = Literal["uv", "other"]
-
 PYTHON_SUFFIXES: Final = (".py", ".pyi")
 GATE_WORKTREE_PREFIX: Final = "cw-gate-wt-impl-"
 GATE_OUTPUT_PREFIX: Final = "cw-gate-out-impl-"
@@ -101,6 +98,14 @@ _EXIT_UNTOUCHED_OK: Final = 1
 
 _SEGMENT_SPLIT: Final = re.compile(r"&&|\|\||[;|\n]")
 _WRAPPERS: Final = frozenset({"make", "pre-commit"})
+# The ``uv run`` options that select the environment; cw repeats these.
+_UV_FLAGS: Final = frozenset({"--all-extras", "--all-groups"})
+_UV_VALUE_OPTIONS: Final = frozenset(
+    {"--extra", "--group", "--with", "--python", "--env-file"}
+)
+_DIRECTORY_CHANGES: Final = frozenset({"cd", "pushd"})
+_ASSIGNMENT: Final = re.compile(r"^[A-Za-z_]\w*\+?=")
+_SHELL_EXPANSION: Final = re.compile(r"[$`]")
 _CONSUMER: Final = re.compile(r"mypy-baseline\s+filter|--baseline-file")
 _BASELINE_PATH_ARG: Final = re.compile(r"--baseline-(?:file|path)(?:=|\s+)(\S+)")
 _DEFAULT_BASELINE_FILES: Final = ("mypy-baseline.txt", ".mypy/baseline.json")
@@ -112,6 +117,21 @@ _ERROR_CODE: Final = re.compile(r"\s\[(?P<code>[a-z0-9-]+)\]\s*$")
 
 
 # -- command declaration ---------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class UvRun:
+    """A tool a declaring segment runs through ``uv run``.
+
+    ``options`` are the environment options cw repeats on its own command for
+    the tool; ``None`` means cw cannot reproduce the declaring command.
+    """
+
+    options: tuple[str, ...] | None
+
+
+#: How a declaring segment launches a tool: through ``uv run``, or otherwise.
+Launch = UvRun | Literal["other"]
 
 
 def _tool_pattern(tool: str) -> re.Pattern[str]:
@@ -134,14 +154,32 @@ def _is_wrapper(tokens: Sequence[str]) -> bool:
     return any(PurePosixPath(token).name in _WRAPPERS for token in tokens)
 
 
-def _declaring_segments(command: str, tool: str) -> list[list[str]]:
-    """Token lists of the segments that name *tool* and are not a wrapper run."""
+def _changes_shell(tokens: Sequence[str]) -> bool:
+    """Whether a segment hands later ones another directory or environment."""
+    words = [word for token in tokens if (word := token.lstrip("({\"'"))]
+    if not words:
+        return False
+    return (
+        words[0] == "export"
+        or any(word in _DIRECTORY_CHANGES for word in words)
+        or all(_ASSIGNMENT.match(word) for word in words)
+    )
+
+
+def _declaring_segments(command: str, tool: str) -> list[tuple[list[str], bool]]:
+    """The segments that name *tool* and are not a wrapper run.
+
+    Each is its tokens and whether an earlier segment changed the directory or
+    the environment.
+    """
     pattern = _tool_pattern(tool)
-    found: list[list[str]] = []
+    found: list[tuple[list[str], bool]] = []
+    changed = False
     for segment in _segments(command):
         tokens = _tokens(segment)
         if pattern.search(segment) and not _is_wrapper(tokens):
-            found.append(tokens)
+            found.append((tokens, changed))
+        changed = changed or _changes_shell(tokens)
     return found
 
 
@@ -150,36 +188,86 @@ def declares_tool(command: str, tool: str) -> bool:
     return bool(_declaring_segments(command, tool))
 
 
-def _uv_runs(tokens: Sequence[str], tool: str) -> bool:
-    """Whether ``uv run`` precedes the first token naming *tool*."""
+def _uv_run_at(tokens: Sequence[str], tool: str) -> int | None:
+    """Where the ``uv run`` before the first token naming *tool* starts."""
     pattern = _tool_pattern(tool)
     for index, token in enumerate(tokens):
         if pattern.search(token):
-            return any(
-                PurePosixPath(tokens[at]).name == "uv" and tokens[at + 1] == "run"
-                for at in range(index - 1)
+            return next(
+                (
+                    at
+                    for at in range(index - 1)
+                    if PurePosixPath(tokens[at]).name == "uv"
+                    and tokens[at + 1] == "run"
+                ),
+                None,
             )
-    return False
+    return None
+
+
+def _env_options(args: Sequence[str]) -> tuple[str, ...] | None:
+    """The environment options leading ``uv run``'s *args*.
+
+    ``None`` when an option is not one cw repeats (``--directory``,
+    ``--project``, ``--package`` or anything unrecognised), or when its value is
+    missing or needs shell expansion.
+    """
+    options: list[str] = []
+    rest = iter(args)
+    for arg in rest:
+        if not arg.startswith("-"):
+            break
+        name, assigned, value = arg.partition("=")
+        if name in _UV_FLAGS and not assigned:
+            options.append(arg)
+            continue
+        if name not in _UV_VALUE_OPTIONS:
+            return None
+        options.append(arg)
+        if not assigned:
+            value = next(rest, "")
+            options.append(value)
+        if not value or _SHELL_EXPANSION.search(value):
+            return None
+    return tuple(options)
+
+
+def _segment_launch(tokens: Sequence[str], tool: str, *, changed: bool) -> Launch:
+    at = _uv_run_at(tokens, tool)
+    if at is None:
+        return "other"
+    if changed or any(_ASSIGNMENT.match(token) for token in tokens[:at]):
+        return UvRun(options=None)
+    return UvRun(options=_env_options(tokens[at + 2 :]))
+
+
+def _rank(launch: Launch) -> int:
+    if not isinstance(launch, UvRun):
+        return 2
+    return 1 if launch.options is None else 0
+
+
+def _preferred(launches: Iterable[Launch | None]) -> Launch | None:
+    """A reproducible ``uv run`` first, then any ``uv run``, then ``other``."""
+    ranked = sorted((item for item in launches if item is not None), key=_rank)
+    return ranked[0] if ranked else None
 
 
 def tool_launch(command: str, tool: str) -> Launch | None:
-    """``uv`` when a declaring segment runs *tool* through ``uv run``.
+    """:class:`UvRun` when a declaring segment runs *tool* through ``uv run``.
 
     ``other`` when *tool* is declared only some other way (bare, ``uvx``,
     ``poetry run``), ``None`` when *command* does not declare it.
     """
-    segments = _declaring_segments(command, tool)
-    if not segments:
-        return None
-    return "uv" if any(_uv_runs(tokens, tool) for tokens in segments) else "other"
+    return _preferred(
+        _segment_launch(tokens, tool, changed=changed)
+        for tokens, changed in _declaring_segments(command, tool)
+    )
 
 
 def launch_over(commands: Sequence[str], tool: str) -> Launch | None:
-    """:func:`tool_launch` over every pinned command: ``uv`` wins, then ``other``."""
-    launches = {tool_launch(command, tool) for command in commands}
-    if "uv" in launches:
-        return "uv"
-    return "other" if "other" in launches else None
+    """The preferred :func:`tool_launch` over every pinned command."""
+    return _preferred(tool_launch(command, tool) for command in commands)
 
 
 def consumer_launch(commands: Sequence[str]) -> Launch | None:
@@ -732,6 +820,7 @@ __all__ = [
     "MypyError",
     "MypyVerdict",
     "PreparePin",
+    "UvRun",
     "VerdictKind",
     "baseline_candidates",
     "baseline_command_block",

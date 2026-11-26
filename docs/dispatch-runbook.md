@@ -4864,6 +4864,16 @@ pushes. cw does everything else:
     all is skipped with `impl_gate4_ruff_not_declared` or
     `impl_gate4_mypy_not_declared`. A turn that touched no Python file runs no
     tool.
+  - *Environment.* cw's own ruff, mypy and debt-record commands run at the repo
+    root as `uv run` plus the declaring segment's `--extra`, `--all-extras`,
+    `--group`, `--all-groups`, `--with`, `--python` and `--env-file` options
+    (`--opt value` or `--opt=value`). When cw cannot reproduce the declaring
+    command (an earlier `cd`, `pushd`, `export` or assignment, an assignment
+    prefix, `--directory`, `--project`, `--package`, any other `uv run` option,
+    or an option value that needs shell expansion), it does not run that tool:
+    `impl_gate4_launcher_unsupported: <tool>`. Of several declaring segments,
+    one cw can reproduce wins, the first in gate order. Baseline commands run
+    verbatim, so only their debt record is skipped this way.
   - *Baseline states.* Candidates are `mypy-baseline.txt`,
     `.mypy/baseline.json` and any `--baseline-file`/`--baseline-path`
     argument, tracked at the fork point. **Detected** (a candidate is tracked
