@@ -59,7 +59,9 @@ _PYTEST_NO_IDENTITY: Final = (
     "Interrupted:",
     "stopping after",
     "Coverage failure",
-    "Required test coverage",
+    # Only the failure form: a met threshold prints "Required test coverage of
+    # N% reached" on every run.
+    "FAIL Required test coverage",
 )
 
 _MYPY_FOUND: Final = re.compile(r"^Found (\d+) errors? in ", re.MULTILINE)

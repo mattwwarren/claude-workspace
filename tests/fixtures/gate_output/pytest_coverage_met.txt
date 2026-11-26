@@ -1,0 +1,32 @@
+============================= test session starts ==============================
+platform linux -- Python 3.13.14, pytest-9.0.2, pluggy-1.6.0
+rootdir: /redacted/repo
+configfile: pyproject.toml
+plugins: xdist-3.8.0, asyncio-1.3.0, cov-7.0.0, mock-3.15.1, anyio-4.13.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 2 items
+
+tests/test_calc.py .F                                                    [100%]
+
+=================================== FAILURES ===================================
+________________________________ test_add_wrong ________________________________
+
+    def test_add_wrong():
+>       assert add(2, 2) == 5
+E       assert 4 == 5
+E        +  where 4 = add(2, 2)
+
+tests/test_calc.py:9: AssertionError
+================================ tests coverage ================================
+_______________ coverage: platform linux, python 3.13.14-final-0 _______________
+
+Name              Stmts   Miss  Cover
+-------------------------------------
+pkg/__init__.py       0      0   100%
+pkg/calc.py           2      0   100%
+-------------------------------------
+TOTAL                 2      0   100%
+Required test coverage of 50% reached. Total coverage: 100.00%
+=========================== short test summary info ============================
+FAILED tests/test_calc.py::test_add_wrong - assert 4 == 5
+========================= 1 failed, 1 passed in 0.02s ==========================

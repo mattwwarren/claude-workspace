@@ -25,6 +25,7 @@ def _read(name: str) -> str:
 _PYTEST = _read("pytest_failures.txt")
 _COLLECT = _read("pytest_collection_error.txt")
 _COVERAGE = _read("pytest_coverage_fail.txt")
+_COVERAGE_MET = _read("pytest_coverage_met.txt")
 _STOP = _read("pytest_stop_first.txt")
 _RUFF = _read("ruff_check.txt")
 _RUFF_CONCISE = _read("ruff_check_concise.txt")
@@ -71,6 +72,21 @@ def test_pytest_identity_is_the_summary_node_ids() -> None:
         ("FAILED", "tests/test_calc.py::test_add_type"),
         ("FAILED", "tests/test_calc.py::test_add_wrong"),
     ]
+
+
+def test_a_met_coverage_threshold_keeps_the_identity() -> None:
+    assert "Required test coverage of 50% reached" in _COVERAGE_MET
+    ident = fid.failure_identity("pytest", _COVERAGE_MET, roots=())
+    assert ident is not None
+    assert ident.items == (("FAILED", "tests/test_calc.py::test_add_wrong"),)
+
+
+@pytest.mark.parametrize("marker", ["FAIL Required test coverage", "Coverage failure"])
+def test_each_coverage_failure_line_alone_gives_no_identity(marker: str) -> None:
+    lines = [line for line in _COVERAGE.splitlines() if marker in line]
+    assert len(lines) == 1
+    text = f"{_COVERAGE_MET}{lines[0]}\n"
+    assert fid.failure_identity("pytest", text, roots=()) is None
 
 
 def test_a_base_superset_matches() -> None:
