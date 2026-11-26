@@ -66,6 +66,7 @@ from tests._tool_fakes import (
     codex_usage_stdout,
     finalize_document,
     finalize_turn_result,
+    signoff_render_echo,
     stdin_contains,
     stub_cw_cli,
     stub_prep_pr_finalize,
@@ -91,6 +92,7 @@ BODY = "## Summary\n\nAdds the widget.\n"
 
 _BLOCKING = GhReply(0, json.dumps({"convergence": "blocking"}), "")
 _CLEAN = GhReply(0, json.dumps({"convergence": "clean"}), "")
+_DEBT_COMPLETE = GhReply(0, json.dumps({"status": "complete", "unticketed": 0}), "")
 _PARK_MISSING = GhReply(0, "REVIEW_APPROVAL_PARK: missing — nothing\n", "")
 _TRANSIENT = "transient"
 _FENCE_EVENTS = [
@@ -109,6 +111,7 @@ _TRACED = (
     "probe_default",
     "push_ahead",
     "create_pr_for",
+    "run_review_artifacts",
     "check_automerge_allowed",
     "arm",
 )
@@ -267,6 +270,14 @@ def _script_default_gh(gh: FakeGhCli, head: str) -> None:
         ),
     )
     gh.reply("pr", "checks", PR_URL, stdout="[]")
+    gh.reply(
+        "pr",
+        "view",
+        PR_URL,
+        "--json",
+        "body,headRefOid",
+        stdout=json.dumps({"body": BODY, "headRefOid": head}),
+    )
 
 
 @pytest.fixture
@@ -326,6 +337,9 @@ def harness(
         monkeypatch.setattr("cw.tracker_post._read_back", lambda *_a, **_k: None)
         h.set_cw("review converge config", _BLOCKING)
         h.set_cw("dev-queue adopted-prs", GhReply(0, "", ""))
+        h.set_cw("review debt file", _DEBT_COMPLETE)
+        h.set_cw("review debt link-pr", GhReply(0, "{}", ""))
+        h.set_cw("review signoff render", signoff_render_echo)
         return h
 
     return _build
@@ -461,6 +475,7 @@ def test_the_fence_and_the_steps_run_in_the_documented_order_and_the_fence_twice
         "push_ahead",
         "turn",
         "create_pr_for",
+        "run_review_artifacts",
         "run_approval_fence",
         "check_automerge_allowed",
         "arm",
@@ -590,6 +605,7 @@ def test_open_pr_is_reused_with_the_reuse_gates_and_no_turn(
         "run_approval_fence",
         "run_finalize_quality_gates",
         "probe_default",
+        "run_review_artifacts",
         "run_approval_fence",
         "check_automerge_allowed",
         "arm",
@@ -735,8 +751,10 @@ def test_the_reuse_path_with_an_override_edits_the_operator_override_section(
         "view",
         PR_URL,
         "--json",
-        "body",
-        stdout=json.dumps({"body": "Intro\n\n## Operator override\n\nold\n"}),
+        "body,headRefOid",
+        stdout=json.dumps(
+            {"body": "Intro\n\n## Operator override\n\nold\n", "headRefOid": h.head}
+        ),
     )
     _override_script(
         0, json.dumps({"status": "overridden", "reason": "operator said so"})
@@ -1236,7 +1254,10 @@ def test_an_epic_child_repair_hands_the_repaired_head_to_arm(
     """The #3861 repair's new head reaches the arm; its friction reaches the result."""
     h, base = _based(harness, ROW_BASE)
     h.turn(finalize_document(pr_title=TITLE, pr_body=BODY))
-    repaired_head = "c" * 40
+    # A real, diffable commit (HEAD does not move): Step 4d diffs the repaired head.
+    repaired_head = git_in(
+        h.worktree, "commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "repair"
+    )
     seen: dict[str, object] = {}
 
     def _repair(
@@ -1489,8 +1510,11 @@ def test_an_unarmed_pr_that_cw_claimed_armed_becomes_blocked(
 @pytest.mark.parametrize(
     ("reply", "needle"),
     [
-        (("pr", "view", PR_URL, "--json", "body"), "could not read the PR body"),
-        (("pr", "edit"), "could not write the operator override section"),
+        (
+            ("pr", "view", PR_URL, "--json", "body,headRefOid"),
+            "could not read the PR body",
+        ),
+        (("pr", "edit"), "could not write the PR body review sections"),
     ],
 )
 def test_an_override_edit_failure_blocks_without_arming(
@@ -1498,14 +1522,22 @@ def test_an_override_edit_failure_blocks_without_arming(
 ) -> None:
     h = harness()
     h.gh.reply("pr", "list", "--head", BRANCH, stdout=_pr_list("OPEN"))
-    h.gh.reply("pr", "view", PR_URL, "--json", "body", stdout='{"body": "x"}')
+    h.gh.reply(
+        "pr",
+        "view",
+        PR_URL,
+        "--json",
+        "body,headRefOid",
+        stdout=json.dumps({"body": "x", "headRefOid": h.head}),
+    )
     _override_script(0, json.dumps({"status": "overridden"}))
     h.turn()
     h.gh.reply(*reply, returncode=1)
     result = h.run()
     _assert_block(result, "operator_unavailable", stage="stage5_post_create")
     assert needle in str(result.blocker)
-    assert h.arm.calls() == []
+    # The view and the edit run after release_ci_hold, so the release is logged.
+    assert _arm_names(h) == ["ci-hold"]
 
 
 def test_an_override_turn_failure_on_reuse_blocks(
