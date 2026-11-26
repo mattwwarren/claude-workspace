@@ -265,8 +265,9 @@ def test_a_path_outside_the_repo_keeps_the_tracked_default(
 ) -> None:
     commit_tracked_file(repo, "mypy-baseline.txt", "x\n")
     # The whole tree is listed: a non-UTF-8 name elsewhere must not raise.
-    git_in(repo, "config", "core.quotePath", "false")
     commit_tracked_file(repo, os.fsdecode(b"caf\xe9.md"), "x\n")
+    # Set after the commit: git would print the raw name and the runner decodes.
+    git_in(repo, "config", "core.quotePath", "false")
     fork = git_in(repo, "rev-parse", "HEAD")
 
     found = gate.detect_mypy_baseline(repo, fork, [command])
