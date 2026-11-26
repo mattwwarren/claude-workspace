@@ -18,7 +18,11 @@ import pytest
 from cw.changelog_sync import ChangelogSync, SyncState
 from cw.stage_verification import finalize_changelog_repair as repair
 from cw.stage_verification import finalize_conflict_resolve as resolve
-from cw.stage_verification.finalize_arm import FREEZE_PREFIX, PR_CONFLICTING_PREFIX
+from cw.stage_verification.finalize_arm import (
+    FREEZE_PREFIX,
+    PR_CONFLICTING_PREFIX,
+    _refusal,
+)
 from cw.stage_verification.finalize_changelog_repair import (
     CHANGELOG_UNION_FRICTION,
     RELEASE_CUT_SYNC_FRICTION,
@@ -50,10 +54,12 @@ from tests.test_codex_finalize_run import (
     PR_NUMBER,
     PR_URL,
     Harness,
+    _arm_names,
     _pr_list,
     _run_handing,
     _view,
     harness,
+    stage_events,
 )
 
 if TYPE_CHECKING:
@@ -520,14 +526,13 @@ def _arm_calls(h: Harness) -> list[list[str]]:
     return [argv for argv in h.arm.calls() if argv[0] == "arm-automerge"]
 
 
-def test_a_merge_freeze_refusal_is_synced_refenced_and_re_armed(
-    harness: Callable[..., Harness],
-) -> None:
-    h = harness().turn().trace()
+def _assert_a_freeze_refusal_is_repaired(h: Harness, arm_names: list[str]) -> None:
+    """Refuse the first arm with a freeze, run, and assert the whole repair."""
     h.arm = stub_prep_pr_finalize(Path.home(), arm_refusals=(_FREEZE_REFUSAL,))
     calls: list[tuple[str, dict[str, Any]]] = []
     h.monkeypatch.setattr(repair, "sync_changelog", _moving_sync(calls))
     _publish_rescripts(h, module=repair)
+    old_head = h.local_head()
 
     result = h.run()
 
@@ -535,29 +540,34 @@ def test_a_merge_freeze_refusal_is_synced_refenced_and_re_armed(
     assert RELEASE_CUT_SYNC_FRICTION in result.friction_highlights
     assert [base for base, _ in calls] == ["main"]
     assert calls[0][1] == {}
-    assert len(_arm_calls(h)) == 2
+    assert _arm_names(h) == arm_names
     second = _arm_calls(h)[-1]
-    assert second[second.index("--head-sha") + 1] == h.origin_tip()
+    new_head = second[second.index("--head-sha") + 1]
+    assert new_head != old_head
+    assert new_head == h.origin_tip()
     assert h.order[-3:] == ["arm", "run_approval_fence", "arm"]
+    assert [e for e in stage_events() if e[0] == "stage.errored"] == []
+
+
+def test_a_merge_freeze_refusal_is_synced_refenced_and_re_armed(
+    harness: Callable[..., Harness],
+) -> None:
+    _assert_a_freeze_refusal_is_repaired(
+        harness().turn().trace(),
+        ["check-automerge-allowed", "arm-automerge", "arm-automerge"],
+    )
 
 
 def test_a_reused_pr_repairs_a_merge_freeze_too(
     harness: Callable[..., Harness],
 ) -> None:
-    h = harness()
+    h = harness().trace()
     h.gh.reply("pr", "list", "--head", BRANCH, stdout=_pr_list("OPEN"))
-    h.arm = stub_prep_pr_finalize(Path.home(), arm_refusals=(_FREEZE_REFUSAL,))
-    calls: list[tuple[str, dict[str, Any]]] = []
-    h.monkeypatch.setattr(repair, "sync_changelog", _moving_sync(calls))
-    _publish_rescripts(h, module=repair)
-
-    result = h.run()
-
-    assert result.status == "shipped"
-    assert len(_arm_calls(h)) == 2
-    second = _arm_calls(h)[-1]
-    assert second[second.index("--head-sha") + 1] == h.origin_tip()
-    assert RELEASE_CUT_SYNC_FRICTION in result.friction_highlights
+    # The reuse path releases any CI hold first.
+    _assert_a_freeze_refusal_is_repaired(
+        h,
+        ["ci-hold", "check-automerge-allowed", "arm-automerge", "arm-automerge"],
+    )
 
 
 def test_a_clean_freeze_sync_re_arms_once_without_a_push(
@@ -673,9 +683,12 @@ def test_a_default_base_conflicting_refusal_is_not_synced(
 
     result = h.run()
 
+    assert result.status == "blocked"
     assert result.blocker is not None
     assert result.blocker.reason == AUTOMERGE_NOT_ARMED
-    assert "GitHub reports the PR conflicting" in result.blocker.details
+    assert result.blocker.details == _refusal(_UNION_REFUSAL, "", {}).details
+    # Only the hint names this flag; the stubbed gh_stderr does not.
+    assert "--union-conflict" in result.blocker.details
     assert f"{PR_CONFLICTING_PREFIX} changelog-sync" not in result.blocker.details
 
 

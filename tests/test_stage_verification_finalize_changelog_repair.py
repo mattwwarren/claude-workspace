@@ -389,6 +389,14 @@ def _repair_arm(
     )
 
 
+def _forbid_push(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _no_push(*_a: object, **_k: object) -> None:
+        message = "a sync that moved nothing must not push"
+        raise AssertionError(message)
+
+    monkeypatch.setattr(repair, "push_ahead", _no_push)
+
+
 class TestArmRefusalRepair:
     """The arm-time repairs of #3939: a release-cut freeze and a ``pr_conflicting:``."""
 
@@ -414,12 +422,8 @@ class TestArmRefusalRepair:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         clone = _changelog_cut_helpers.epic_sibling_repo(tmp_path, make_git_repo)
+        _forbid_push(monkeypatch)
 
-        def _no_push(*_a: object, **_k: object) -> None:
-            message = "a clean sync must not push"
-            raise AssertionError(message)
-
-        monkeypatch.setattr(repair, "push_ahead", _no_push)
         outcome = _repair_arm(clone, _FREEZE_STDERR)
 
         assert outcome == repair.ArmRepair(FREEZE_PREFIX)
@@ -441,6 +445,7 @@ class TestArmRefusalRepair:
         clone = _changelog_cut_helpers.epic_sibling_repo(tmp_path, make_git_repo)
         stuck = ChangelogSync(state, None, None, "x-disposition", (), (), "why")
         monkeypatch.setattr(repair, "sync_changelog", lambda *_a, **_k: stuck)
+        _forbid_push(monkeypatch)
 
         outcome = _repair_arm(clone, _FREEZE_STDERR)
 
