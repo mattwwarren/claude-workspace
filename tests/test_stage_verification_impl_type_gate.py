@@ -456,6 +456,42 @@ def test_baseline_growth_reports_added_lines_only(repo: Path) -> None:
     assert added == ["new entry"]
 
 
+def _hide_attribute(repo: Path) -> None:
+    commit_tracked_file(repo, ".gitattributes", "mypy-baseline.txt -diff\n")
+
+
+@pytest.mark.parametrize(
+    "configure",
+    [
+        lambda repo: git_in(repo, "config", "color.ui", "always"),
+        lambda repo: git_in(repo, "config", "diff.external", "true"),
+        _hide_attribute,
+    ],
+    ids=["color-always", "diff-external", "diff-attribute"],
+)
+def test_baseline_growth_ignores_diff_settings(
+    repo: Path, configure: Callable[[Path], object]
+) -> None:
+    commit_tracked_file(repo, "mypy-baseline.txt", "keep\n")
+    configure(repo)
+    fork = git_in(repo, "rev-parse", "HEAD")
+    (repo / "mypy-baseline.txt").write_text("keep\nnew entry\n", encoding="utf-8")
+
+    added = gate.baseline_growth(repo, fork, _snap(repo), "mypy-baseline.txt")
+
+    assert added == ["new entry"]
+
+
+def test_baseline_growth_reads_a_non_utf8_line(repo: Path) -> None:
+    commit_tracked_file(repo, "mypy-baseline.txt", "keep\n")
+    fork = git_in(repo, "rev-parse", "HEAD")
+    (repo / "mypy-baseline.txt").write_bytes(b"keep\nbad \xff entry\n")
+
+    added = gate.baseline_growth(repo, fork, _snap(repo), "mypy-baseline.txt")
+
+    assert added == ["bad � entry"]
+
+
 # -- the gate worktree ---------------------------------------------------------
 
 

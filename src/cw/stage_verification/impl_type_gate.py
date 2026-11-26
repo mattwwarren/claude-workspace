@@ -501,7 +501,23 @@ def path_args(files: Sequence[str]) -> list[str]:
 
 def baseline_growth(worktree: Path, fork: str, snap: str, path: str) -> list[str]:
     """The lines the branch added to baseline file *path* since *fork*."""
-    out = git_output(["diff", fork, snap, "--", path], cwd=worktree)
+    # A plain text diff whatever the repo configures: colour, an external diff,
+    # a textconv or a ``-diff``/``binary`` attribute would hide the added lines.
+    out = git_output(
+        [
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--text",
+            fork,
+            snap,
+            "--",
+            path,
+        ],
+        cwd=worktree,
+        errors="replace",
+    )
     return [line[1:] for line in out.splitlines() if _ADDED_LINE.match(line)]
 
 
