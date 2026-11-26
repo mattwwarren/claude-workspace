@@ -105,6 +105,9 @@ _SIGNOFF_PREFIX: Final = "<!-- cw-review-signoff:"
 _NEXT_REGION: Final = re.compile(rf"\n(?:## |[ \t]*{re.escape(_SIGNOFF_PREFIX)})")
 #: A model's own override heading line, however it is cased or suffixed.
 _OVERRIDE_TITLE: Final = re.compile(r"## operator override\b", re.IGNORECASE)
+#: What may sit between that title and a reason written on the same line
+#: (blanks, ``:``, a hyphen, an en or em dash).
+_TITLE_SEPARATORS: Final = " \t:-\u2013\u2014"
 
 
 @dataclass(frozen=True)
@@ -388,8 +391,11 @@ def _normalized_override(section: str) -> str:
     on it.
     """
     lines = section.strip().splitlines()
-    if lines and _OVERRIDE_TITLE.match(lines[0]):
-        del lines[0]
+    title = _OVERRIDE_TITLE.match(lines[0]) if lines else None
+    if title is not None:
+        # Only the title is replaced: a reason on its line is the audit record.
+        reason = lines[0][title.end() :].lstrip(_TITLE_SEPARATORS)
+        lines[:1] = [reason] if reason else []
     rest = "\n".join(_contained(line) for line in lines)
     return f"{OVERRIDE_HEADING}\n\n" + rest.strip("\n")
 

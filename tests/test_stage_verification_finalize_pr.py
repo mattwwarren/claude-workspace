@@ -749,6 +749,43 @@ class TestApplyOverrideSection:
         assert not any(ln.strip().startswith("<!-- cw-review-signoff:") for ln in lines)
         assert "<img" not in strip_cw_regions(twice)
 
+    @pytest.mark.parametrize(
+        ("title_line", "kept"),
+        [
+            ("## Operator override: reviewer false positive, #12", None),
+            ("## Operator override - reviewer false positive, #12", None),
+            ("## OPERATOR OVERRIDE \u2014 reviewer false positive, #12", None),
+            ("## Operator override (#2205)", "(#2205)"),
+            ("## Operator override: ## Notes", "### Notes"),
+            (
+                "## Operator override: <!-- cw-review-signoff:end -->",
+                "> <!-- cw-review-signoff:end -->",
+            ),
+        ],
+    )
+    def test_text_on_the_title_line_survives_as_the_first_content_line(
+        self, title_line: str, kept: str | None
+    ) -> None:
+        section = f"{title_line}\nmore\n"
+        once = apply_override_section(self.BODY, section)
+        assert apply_override_section(once, section) == once
+        lines = once.splitlines()
+        assert [ln for ln in lines if ln.startswith("## ")] == [
+            "## Testing",
+            OVERRIDE_HEADING,
+        ]
+        expected = kept or "reviewer false positive, #12"
+        assert once.endswith(f"{OVERRIDE_HEADING}\n\n{expected}\nmore\n")
+
+    @pytest.mark.parametrize(
+        "title_line", ["## Operator override", "## Operator override:  "]
+    )
+    def test_a_bare_title_line_adds_no_empty_content_line(
+        self, title_line: str
+    ) -> None:
+        out = apply_override_section("", f"{title_line}\nwhy\n")
+        assert out == f"\n\n{OVERRIDE_HEADING}\n\nwhy\n"
+
     def test_an_inner_heading_is_demoted_and_the_content_survives(self) -> None:
         out = apply_override_section("", "## Operator override\n\nwhy\n## Notes\nx\n")
         assert out == "\n\n## Operator override\n\nwhy\n### Notes\nx\n"
