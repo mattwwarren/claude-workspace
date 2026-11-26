@@ -790,6 +790,24 @@ def test_the_create_path_with_an_override_puts_the_section_in_the_body(
     assert "Waived: ok." in call.body_file
 
 
+def test_the_create_path_normalises_a_cased_override_heading(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness()
+    _override_script(0, json.dumps({"status": "overridden", "reason": "r"}))
+    h.turn(
+        finalize_document(
+            pr_body=BODY,
+            override_section="## Operator Override\n\nWaived: ok.\n",
+        )
+    )
+    h.run()
+    (call,) = h.created()
+    assert call.body_file is not None
+    assert call.body_file.endswith("\n\n## Operator override\n\nWaived: ok.\n")
+    assert "## Operator Override" not in call.body_file
+
+
 def _override_script(code: int, stdout: str = "") -> Path:
     path = Path.home() / ".claude" / "scripts" / "check_must_fix_override.py"
     path.parent.mkdir(parents=True, exist_ok=True)

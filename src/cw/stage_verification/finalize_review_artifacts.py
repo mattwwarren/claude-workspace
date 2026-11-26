@@ -44,8 +44,8 @@ from cw.review_debt_filing import debt_entry, is_fixture_entry
 from cw.review_signoff import friction_line
 from cw.stage_verification.finalize_gates import run_cw_cli
 from cw.stage_verification.finalize_pr import (
-    OVERRIDE_HEADING,
     apply_body_section,
+    apply_override_section,
     heading_matches,
     strip_cw_regions,
 )
@@ -388,9 +388,7 @@ def write_pr_body(
             composed, section, heading=REVIEW_ADJUDICATION_HEADING
         )
     if target.override_section:
-        composed = apply_body_section(
-            composed, target.override_section, heading=OVERRIDE_HEADING
-        )
+        composed = apply_override_section(composed, target.override_section)
     sections_changed = _normalized(composed) != _normalized(current)
     current_file = target.scratch / _BODY_CURRENT
     composed_file = target.scratch / _BODY_COMPOSED

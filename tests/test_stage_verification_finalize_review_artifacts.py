@@ -495,6 +495,12 @@ class TestWritePrBody:
         (edit,) = rig.edits()
         assert edit.index(REVIEW_ADJUDICATION_HEADING) < edit.index(OVERRIDE_HEADING)
 
+    def test_a_suffixed_override_heading_is_normalised(self, rig: Rig) -> None:
+        rig.with_target(override_section="## Operator override (#2205)\n\nwaived\n")
+        write_pr_body(rig.target, current=_BODY, pr_head=_HEAD, section="")
+        (edit,) = rig.edits()
+        assert edit.endswith(f"\n\n{OVERRIDE_HEADING}\n\nwaived\n")
+
     def test_an_unchanged_body_makes_no_edit(self, rig: Rig) -> None:
         section = _render_adjudication(_defer())
         body = f"{_BODY.rstrip()}\n\n{section.strip()}\n"

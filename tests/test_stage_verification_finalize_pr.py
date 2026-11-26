@@ -28,6 +28,7 @@ from cw.stage_verification.finalize_pr import (
     BoundPr,
     DetectedPr,
     apply_body_section,
+    apply_override_section,
     bind_live_pr,
     check_mergeability,
     create_pr_for,
@@ -711,6 +712,44 @@ class TestApplyBodySection:
         out = self._adjudication(body)
         assert "more finding text" not in out
         assert self._adjudication(out) == out
+
+
+class TestApplyOverrideSection:
+    """A model-written heading must not leave cw's text outside the region."""
+
+    BODY = "Intro\n\n## Testing\n\nran\n"
+
+    @pytest.mark.parametrize(
+        "section",
+        [
+            "## Operator override (#2205)\n\nwaived <img>\n",
+            "## Operator Override\n\nwaived <img>\n",
+            "## Operator override\n\nwaived\n\n## Notes\n\n<img>\n",
+            "waived\n\n## Operator override (again)\n\n<img>\n",
+        ],
+    )
+    def test_two_applies_leave_one_region_the_media_check_drops(
+        self, section: str
+    ) -> None:
+        once = apply_override_section(self.BODY, section)
+        twice = apply_override_section(once, section)
+        assert twice == once
+        lines = twice.splitlines()
+        assert [ln for ln in lines if ln.startswith("## ")] == [
+            "## Testing",
+            OVERRIDE_HEADING,
+        ]
+        assert "waived" in twice
+        assert "<img" not in strip_cw_regions(twice)
+
+    def test_an_inner_heading_is_demoted_and_the_content_survives(self) -> None:
+        out = apply_override_section("", "## Operator override\n\nwhy\n## Notes\nx\n")
+        assert out == "\n\n## Operator override\n\nwhy\n### Notes\nx\n"
+
+    def test_a_section_without_a_heading_is_prefixed_and_kept_verbatim(self) -> None:
+        raw = '{"status": "overridden", "reason": "## not a heading"}'
+        out = apply_override_section("Intro\n", raw)
+        assert out == f"Intro\n\n{OVERRIDE_HEADING}\n\n{raw}\n"
 
 
 class TestStripCwRegions:

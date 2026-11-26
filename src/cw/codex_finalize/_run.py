@@ -122,11 +122,11 @@ from cw.stage_verification.finalize_gates import (
 )
 from cw.stage_verification.finalize_merge_gate import run_merge_gate
 from cw.stage_verification.finalize_pr import (
-    OVERRIDE_HEADING,
     PR_MERGED,
     BoundPr,
     DetectedPr,
     apply_body_section,
+    apply_override_section,
     bind_live_pr,
     create_pr_for,
     detect_branch_pr,
@@ -378,9 +378,7 @@ def _pr_body(doc: FinalizeTurnDocument, state: _State, worktree: Path) -> str:
     if section:
         body = apply_body_section(body, section, heading=REVIEW_ADJUDICATION_HEADING)
     if state.override_section is not None:
-        body = apply_body_section(
-            body, state.override_section, heading=OVERRIDE_HEADING
-        )
+        body = apply_override_section(body, state.override_section)
     return body.rstrip() + "\n"
 
 
