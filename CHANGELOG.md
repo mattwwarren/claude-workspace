@@ -17,7 +17,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- A codex-created PR body now leads with `Closes #<n>` for a GitHub-numeric ticket id, so GitHub links and closes the issue.
+- A codex-created PR body now leads with `Closes #<n>` for a GitHub-numeric ticket id.
 
 ## [1.112.0] - 2026-11-26
 
