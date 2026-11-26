@@ -302,19 +302,32 @@ def consumer_launch(commands: Sequence[str]) -> Launch | None:
 # -- baseline detection ------------------------------------------------------------
 
 
+def _mypy_segments(command: str) -> list[str]:
+    """The segments of *command* that declare mypy or ``mypy-baseline``.
+
+    Other tools take ``--baseline-file``/``--baseline-path`` too.
+    """
+    return [
+        segment
+        for segment in _segments(command)
+        if declares_tool(segment, MYPY) or declares_tool(segment, BASELINE_TOOL)
+    ]
+
+
 def is_baseline_consumer(command: str) -> bool:
     """Whether *command* consumes a mypy baseline (``mypy-baseline filter``)."""
-    return bool(_CONSUMER.search(command))
+    return any(_CONSUMER.search(segment) for segment in _mypy_segments(command))
 
 
 def baseline_candidates(commands: Sequence[str]) -> tuple[str, ...]:
-    """The default baseline paths plus every ``--baseline-file``/``-path`` argument."""
+    """The default baseline paths plus mypy's ``--baseline-file``/``-path`` args."""
     found = list(_DEFAULT_BASELINE_FILES)
     for command in commands:
-        for match in _BASELINE_PATH_ARG.finditer(command):
-            path = os.path.normpath(match.group(1).strip("'\""))
-            if path not in found:
-                found.append(path)
+        for segment in _mypy_segments(command):
+            for match in _BASELINE_PATH_ARG.finditer(segment):
+                path = os.path.normpath(match.group(1).strip("'\""))
+                if path not in found:
+                    found.append(path)
     return tuple(found)
 
 

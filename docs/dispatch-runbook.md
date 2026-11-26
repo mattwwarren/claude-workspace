@@ -4881,8 +4881,11 @@ pushes. cw does everything else:
     this way.
   - *Baseline states.* Candidates are `mypy-baseline.txt`,
     `.mypy/baseline.json` and any `--baseline-file`/`--baseline-path`
-    argument, tracked at the fork point. **Detected** (a candidate is tracked
-    and a pinned command matches `mypy-baseline filter` or `--baseline-file`):
+    argument, tracked at the fork point. Those arguments, and the consumer
+    match below, are read only from command segments that name `mypy` or
+    `mypy-baseline`, so another tool's baseline option does not count.
+    **Detected** (a candidate is tracked and a pinned command matches
+    `mypy-baseline filter` or `--baseline-file` in such a segment):
     cw runs each such command verbatim in place of plain mypy
     (`impl_mypy_baseline: file=... cmd=...` friction); any non-zero exit parks.
     **Consumer unknown** (a candidate is tracked, no pinned command consumes

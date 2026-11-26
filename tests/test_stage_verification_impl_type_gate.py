@@ -240,7 +240,47 @@ def test_a_baseline_file_argument_is_a_candidate(repo: Path) -> None:
     found = gate.detect_mypy_baseline(repo, fork, [command])
 
     assert found == MypyBaseline(files=("conf/mypy-base.json",), commands=(command,))
-    assert gate.baseline_candidates(["x --baseline-path 'b.txt'"])[-1] == "b.txt"
+    assert gate.baseline_candidates(["mypy --baseline-path 'b.txt'"])[-1] == "b.txt"
+
+
+_DEFAULTS = ("mypy-baseline.txt", ".mypy/baseline.json")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gitleaks detect --baseline-path .gitleaks-baseline.json",
+        "uv run pytest --baseline-file perf.json",
+        "gitleaks detect --baseline-path x && uv run mypy src/",
+        "uv run pytest --baseline-file=perf.json && uv run mypy src/",
+    ],
+)
+def test_another_tools_baseline_argument_is_not_mypys(command: str) -> None:
+    assert gate.baseline_candidates([command]) == _DEFAULTS
+    assert gate.is_baseline_consumer(command) is False
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "uv run mypy src/ | uv run mypy-baseline filter",
+        "uv run mypy --baseline-file conf/b.json src/",
+        "gitleaks detect && uv run mypy --baseline-file conf/b.json src/",
+    ],
+)
+def test_a_mypy_segment_is_still_a_baseline_consumer(command: str) -> None:
+    assert gate.is_baseline_consumer(command) is True
+
+
+def test_another_tools_tracked_baseline_is_no_mypy_baseline(repo: Path) -> None:
+    _push_main(repo, ".gitleaks-baseline.json", "[]\n")
+    fork = git_in(repo, "rev-parse", "origin/main")
+    commands = [
+        "gitleaks detect --baseline-path .gitleaks-baseline.json",
+        "uv run mypy src/",
+    ]
+
+    assert gate.detect_mypy_baseline(repo, fork, commands) is None
 
 
 @pytest.mark.parametrize(
