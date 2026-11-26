@@ -1575,6 +1575,53 @@ class TestBaseStateClassifier:
         assert len(scratch_launches) == 1
 
 
+_LONG_NODE_TEST = (
+    "def test_the_finalize_gate_reports_a_failure_for_the_branch_tip_only"
+    "_on_a_long_node_id():\n    assert 1 == 2\n"
+)
+
+
+class TestGateTerminalWidth:
+    def test_the_branch_and_base_runs_see_the_same_wide_terminal(
+        self,
+        gated: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("COLUMNS", "80")
+        seen = tmp_path / "columns.log"
+        command = f'echo "$COLUMNS" >> {shlex.quote(str(seen))}; echo boom; exit 3'
+        install_home_prep_pr_state(tmp_path / "state", ("lint", command, 5.0))
+        block = _gate_run(gated, "reuse").block
+        assert block is not None
+        assert block.reason == "external_state_block"
+        # The branch run, then the base warm-up and the compared base run.
+        assert seen.read_text(encoding="utf-8").split() == ["200", "200", "200"]
+
+    def test_real_pytest_on_a_long_node_id_is_classified_against_base(
+        self,
+        gated: Path,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level(logging.WARNING)
+        probe = tmp_path / "probe"
+        probe.mkdir()
+        (probe / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+        (probe / "test_probe.py").write_text(_LONG_NODE_TEST, encoding="utf-8")
+        # CI and BUILD_NUMBER would stop pytest cutting at any width.
+        command = (
+            f"cd {shlex.quote(str(probe))} && "
+            "env -u CI -u BUILD_NUMBER -u PYTEST_ADDOPTS PYTHONDONTWRITEBYTECODE=1 "
+            f"{shlex.quote(sys.executable)} -m pytest -p no:cacheprovider"
+        )
+        install_home_prep_pr_state(tmp_path / "state", ("pytest", command, 60.0))
+        block = _gate_run(gated, "reuse").block
+        assert block is not None
+        assert _unclassified_reasons(caplog) == []
+        assert block.reason == "external_state_block"
+
+
 class TestBaseStateWarmUp:
     def test_an_unrecognised_gate_is_warmed_then_compared(
         self, gated: Path, tmp_path: Path, scratch_launches: list[str]

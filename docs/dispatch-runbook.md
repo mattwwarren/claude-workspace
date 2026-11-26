@@ -5058,7 +5058,7 @@ Everything below is cw-run Python; no codex turn gets write access.
   gate=… reason=…`, `reason` one of `exit_code_not_comparable`,
   `tracked_changes`, `environment_in_worktree`, `no_identity`,
   `fetch_failed`, `scratch_tree_failed`, `did_not_complete`, `reset_failed`,
-  `base_passed`, `exit_code_differs`, `identity_differs`. A pytest failure is its summary line, node id and message together: a different exception or message on base does not match, and a line with no message, or one cut before the exception type, is `no_identity`. An unrecognised
+  `base_passed`, `exit_code_differs`, `identity_differs`. A pytest failure is its summary line, node id and message together: a different exception or message on base does not match, and a line with no message, or one cut before the exception type, is `no_identity`. Every FINALIZE gate run, on the branch and on base, gets `COLUMNS=200` (pytest's 80-column default drops the message after a long node id); a node id too long to leave room even at 200 stays `no_identity`. An unrecognised
   gate runs twice in the scratch tree: a warm-up that only provisions it, a
   `git reset --hard <base sha>` there (no `git clean`, so ignored provisioned
   state survives), then the compared run. Cost: a recognised red gate runs

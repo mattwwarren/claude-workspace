@@ -115,6 +115,17 @@ def test_a_summary_line_without_a_whole_exception_type_has_no_identity(
     assert fid.failure_identity("pytest", _read(capture), roots=()) is None
 
 
+def test_a_long_node_id_has_an_identity_only_on_the_wide_terminal() -> None:
+    # The same two tests, captured at 80 and at the gate runs' 200 columns.
+    assert (
+        fid.failure_identity("pytest", _read("pytest_long_node_80.txt"), roots=())
+        is None
+    )
+    wide = fid.failure_identity("pytest", _read("pytest_long_node_200.txt"), roots=())
+    assert wide is not None
+    assert [item[2] for item in wide.items] == ["assert 1 == 2", "KeyError: 'missing'"]
+
+
 def test_a_met_coverage_threshold_keeps_the_identity() -> None:
     assert "Required test coverage of 50% reached" in _COVERAGE_MET
     ident = fid.failure_identity("pytest", _COVERAGE_MET, roots=())

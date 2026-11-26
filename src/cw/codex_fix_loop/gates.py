@@ -162,9 +162,9 @@ class GateScope:
 class PlannedGate:
     """One detected gate: name, shell command, signal ceiling (seconds), autofix.
 
-    ``autofix`` is the declared command to run when the gate fails red (#3412),
-    or ``None`` when the gate declares none. ``accept_hook_rewrite`` is False
-    when config opts the gate out of the hook-rewrite acceptance (#3689).
+    ``autofix`` is the command for a red gate (#3412), or ``None``.
+    ``accept_hook_rewrite`` is False when config opts the gate out of the
+    hook-rewrite acceptance (#3689). ``env`` goes on top of the gate env (#3542).
     """
 
     name: str
@@ -172,6 +172,7 @@ class PlannedGate:
     ceiling_s: float
     autofix: str | None = None
     accept_hook_rewrite: bool = True
+    env: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -633,7 +634,7 @@ def _run_one_gate(
             watched = _run_watched(
                 ["sh", "-c", gate.command],
                 cwd=worktree,
-                env=env,
+                env=env | dict(gate.env),
                 ceiling_s=gate.ceiling_s,
                 gate=gate.name,
                 scope=scope,

@@ -101,6 +101,11 @@ _TAIL: Final = 500
 REWRITE_NOTE_MAX_PATHS: Final = 5
 _DIFF_TIMEOUT: Final = 30
 _CYCLE: Final = 0
+#: Set on every FINALIZE gate run, branch and base alike (#3542). A spooled run
+#: is 80 columns, where pytest drops the message from a long node id's summary
+#: line, so it has no failure identity. Not wider: pytest pads its rule lines to
+#: the width, and posted gate output is cut at 120 characters a line.
+_GATE_ENV: Final = (("COLUMNS", "200"),)
 _CONTINUE_TOKENS: Final = frozenset({APPROVAL_NOT_REQUIRED, APPROVAL_RECORDED})
 
 #: The semantic auto-resolve's gate path (#3542): no CI consult, no classifier.
@@ -471,10 +476,13 @@ def run_approval_fence(
 # -- quality gates -------------------------------------------------------------
 
 
-def _no_autofix(plan: GatePlan) -> GatePlan:
-    return replace(
-        plan, gates=tuple(replace(gate, autofix=None) for gate in plan.gates)
-    )
+def _finalize_plan(plan: GatePlan) -> GatePlan:
+    """*plan* as FINALIZE runs it: no autofix, and the :data:`_GATE_ENV` env.
+
+    The base-state runs are pinned from this plan too, so they see the same env.
+    """
+    gates = tuple(replace(g, autofix=None, env=_GATE_ENV) for g in plan.gates)
+    return replace(plan, gates=gates)
 
 
 @dataclass(frozen=True)
@@ -659,7 +667,7 @@ def run_finalize_quality_gates(
                 "(uncommitted or unfinished work); nothing was pushed or created",
             )
         )
-    detected = _no_autofix(plan_cycle_gates(worktree, scope))
+    detected = _finalize_plan(plan_cycle_gates(worktree, scope))
     ci_plan = _consult(detected, worktree, path, ci)
     if ci_plan.block is not None:
         return FinalizeGateRun(ci_plan.block, ci_plan.friction)
