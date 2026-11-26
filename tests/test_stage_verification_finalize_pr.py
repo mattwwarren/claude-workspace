@@ -746,6 +746,7 @@ class TestApplyOverrideSection:
             OVERRIDE_HEADING,
         ]
         assert "waived" in twice
+        assert not any(ln.strip().startswith("<!-- cw-review-signoff:") for ln in lines)
         assert "<img" not in strip_cw_regions(twice)
 
     def test_an_inner_heading_is_demoted_and_the_content_survives(self) -> None:
