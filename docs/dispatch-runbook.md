@@ -4888,8 +4888,8 @@ pushes. cw does everything else:
     tracked states the baseline file may not gain lines since the fork point
     (a growth parks, "a suppression that needs explicit approval"), even when
     no Python file was touched. To declare a baseline, put the `uv run`
-    pipeline (for example `uv run mypy src/ | uv run mypy-baseline filter`) in the
-    repo's CLAUDE.md `## Quality Gates` block so `detect-gates` reports it.
+    pipeline (for example `uv run mypy src/ | uv run mypy-baseline filter`) in
+    the repo's CLAUDE.md `## Quality Gates` block so `detect-gates` reports it.
   - *Mypy attribution (no baseline).* Exit 0 passes. Any `error:` diagnostic in
     a touched file parks with those lines, the quoted rule "fix every mypy
     error in touched files, pre-existing ones included" and the touched file
@@ -4907,9 +4907,9 @@ pushes. cw does everything else:
     exact repo-relative path in `mypy-baseline.txt` or `.mypy/baseline.json`)
     is recorded. A touched file with errors and no entry (a new file, or one
     outside the baseline command's scope) gets no record and does not block:
-    `impl_gate4_baseline_uncovered: <files>`. The record never blocks: a malformed artifact is left untouched with
-    `deferred_findings_unparseable`, any other failure is
-    `impl_baselined_record_failed`.
+    `impl_gate4_baseline_uncovered: <files>`. The record never blocks: a
+    malformed artifact is left untouched with `deferred_findings_unparseable`,
+    any other failure is `impl_baselined_record_failed`.
   - *`tests.prepare`* is read before the turn from the default branch
     (`origin/HEAD`, else `origin/<default_branch>`), never from the turn's
     tree, and runs first in the gate worktree (`bash -c`) only when ruff or
