@@ -92,6 +92,7 @@ from cw.review_adjudication import (
     REVIEW_ADJUDICATION_HEADING,
 )
 from cw.stage_verification.finalize_arm import (
+    PR_CONFLICTING_PREFIX,
     arm,
     check_automerge_allowed,
     mark_adopted_ready,
@@ -100,6 +101,7 @@ from cw.stage_verification.finalize_arm import (
 from cw.stage_verification.finalize_changelog_repair import (
     MergeabilityOutcome,
     check_mergeability_repairing,
+    repair_arm_refusal,
 )
 from cw.stage_verification.finalize_ci_evidence import (
     CiContext,
@@ -201,6 +203,8 @@ class _State:
     override_section: str | None = None
     friction: list[str] = field(default_factory=list)
     deferred: tuple[DeferredGate, ...] = ()
+    # A pre-arm conflict merge spent the union repair for this run (#3939).
+    conflict_merged: bool = False
 
     def stamped(self) -> FinalizeFacts:
         """The facts with the accumulated friction."""
@@ -458,6 +462,8 @@ def _mergeable(
 
     At most one merge: the resolver runs only when the union repair did not
     move HEAD and did not refuse (#3861 amendment), and never on a reuse run.
+    A merge made here, by the union repair or the resolver, also spends the
+    arm-time union repair (#3939).
     """
     # stays on client.default_branch: the non-default-base gate asks whether the row's
     # base is the repo default itself (the trust root), not where the row merges.
@@ -483,10 +489,11 @@ def _mergeable(
             block = outcome.block
     if outcome.head is not None:
         state.head = outcome.head
+        state.conflict_merged = True
     return _with_conflict_info(run, block, bound) if block is not None else None
 
 
-def _arm_pr(run: _Run, state: _State, bound: BoundPr) -> bool | FinalizeBlock:
+def _arm_pr(run: _Run, state: _State, bound: BoundPr) -> bool | FinalizeBlock | Payload:
     """The seam check, the adopted draft ``ready`` step and the arm."""
     pr_info: dict[str, object] = {"number": bound.number, "url": bound.url}
     allowed = check_automerge_allowed(run.worktree, pr_info)
@@ -500,10 +507,48 @@ def _arm_pr(run: _Run, state: _State, bound: BoundPr) -> bool | FinalizeBlock:
             # The doc's fence: a PR that is not ready is reported unarmed.
             return replace(ready, pr_info={**pr_info, "auto_merge": False})
         state.friction.extend(friction)
-    result = arm(
-        run.worktree, pr_number=bound.number, head_sha=state.head, pr_info=pr_info
-    )
-    return result.block if result.block is not None else result.armed
+    return _arm_repairing(run, state, bound, pr_info)
+
+
+def _arm_repairing(
+    run: _Run, state: _State, bound: BoundPr, pr_info: dict[str, object]
+) -> bool | FinalizeBlock | Payload:
+    """Arm; on an arm-refusal repair, re-fence and re-arm (#3939).
+
+    Each refusal kind is repaired at most once per run (the spent set), so the
+    loop ends: every pass returns, or adds a new kind that yields no repair next
+    time. The default-branch read below is the same trust-root read
+    ``_mergeable`` makes.
+    """
+    spent = {PR_CONFLICTING_PREFIX} if state.conflict_merged else set[str]()
+    while True:
+        result = arm(
+            run.worktree, pr_number=bound.number, head_sha=state.head, pr_info=pr_info
+        )
+        if result.block is None:
+            return result.armed
+        repair = repair_arm_refusal(
+            run.worktree,
+            result,
+            spent=spent,
+            base_branch=run.base_branch,
+            # stays on client.default_branch: the union repair asks whether the row's
+            # base is the repo default itself (the trust root), not where it merges.
+            default_branch=run.client.default_branch,
+            branch=state.branch,
+        )
+        if repair is None:
+            return result.block
+        spent.add(repair.prefix)
+        if repair.block is not None:
+            return repair.block
+        if repair.head is not None:
+            state.head = repair.head
+            park = _fence(run, state)
+            if park is not None:
+                return park
+        if repair.friction is not None:
+            state.friction.append(repair.friction)
 
 
 def _held_arm_state(run: _Run, state: _State, bound: BoundPr) -> bool | FinalizeBlock:
@@ -565,8 +610,12 @@ def _arm_and_ship(
     if park is not None:
         return park
     armed = _held_arm_state(run, state, bound) if hold else _arm_pr(run, state, bound)
-    if isinstance(armed, FinalizeBlock):
-        return run.blocked(armed, state, STAGE5_POST_CREATE)
+    if not isinstance(armed, bool):
+        return (
+            armed
+            if isinstance(armed, dict)
+            else run.blocked(armed, state, STAGE5_POST_CREATE)
+        )
     pr_info: dict[str, object] = {"number": bound.number, "url": bound.url}
     blocked, friction = verify_pr_state(
         run.worktree,

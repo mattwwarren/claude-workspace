@@ -1775,7 +1775,7 @@ elements:
   finalize.post-ship-pipeline-bookkeeping:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_finalize/_run.py, symbol: _arm_and_ship}, note: "ship-tail work in _arm_and_ship (review artifacts, arm, verification); PR-link comment: src/cw/codex_finalize/_post.py::post_pr_link_comment; not carried: two arm-time repairs (#3939); cw performs no Linear state transition (#3938)"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_finalize/_run.py, symbol: _arm_and_ship}, note: "ship-tail work in _arm_and_ship (review artifacts, arm, verification); PR-link comment: src/cw/codex_finalize/_post.py::post_pr_link_comment; arm-refusal repairs run in _arm_repairing (#3939); cw performs no Linear state transition (#3938)"}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   finalize.gate-ui-evidence:

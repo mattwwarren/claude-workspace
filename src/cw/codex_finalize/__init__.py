@@ -25,7 +25,8 @@ Submodules:
   create, mergeability.
 - ``cw.stage_verification.finalize_arm`` — the seam check, the arm and the verification.
 - ``cw.stage_verification.finalize_changelog_repair`` — the one-shot CHANGELOG-union
-  repair around the mergeability check (#3861).
+  repair around the mergeability check (#3861) and the arm-refusal repairs (the
+  release-cut freeze and the arm-time union sync, #3939).
 - ``cw.stage_verification.finalize_review_artifacts`` and
   ``cw.stage_verification.finalize_ui_evidence`` — Step 4d (#3543).
 - ``_post`` — the PR-link comment.
