@@ -17,6 +17,7 @@ import cw.stage_verification.finalize_gates as gates_module
 import cw.stage_verification.finalize_merge_gate as merge_gate_module
 import cw.stage_verification.finalize_pr as pr_module
 import cw.stage_verification.finalize_result as result_module
+import cw.stage_verification.finalize_review_artifacts as artifacts_module
 from cw.auto_dev_result import AutoDevResult
 from cw.auto_dev_result.parse import (
     BLOCKER_REASON_NO_RESULT_EMITTED,
@@ -440,6 +441,7 @@ _SWEPT_MODULES = (
     pr_module,
     arm_module,
     merge_gate_module,
+    artifacts_module,
 )
 # Reasons that reach a block through a variable, not a literal call argument.
 _DYNAMIC_REASONS = frozenset({PUSH_AUTH_FAILED, IMPL_NOT_PUSHED})

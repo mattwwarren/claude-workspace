@@ -57,6 +57,7 @@ from tests._tool_fakes import (
     read_calls,
     restore_real_run,
     shim_env,
+    signoff_render_echo,
     station_findings_doc,
     stdin_contains,
     stub_cw_cli,
@@ -1106,6 +1107,48 @@ class TestFinalizeFakes:
 
         assert done.returncode == 1
         assert json.loads(done.stdout)["gh_stderr"] == "refused"
+
+    def test_a_callable_cw_reply_sees_the_args(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = stub_cw_cli(
+            monkeypatch,
+            {
+                "review a": lambda args: GhReply(0, "|".join(args)),
+                "review b": [lambda _args: None, GhReply(1)],
+            },
+        )
+
+        first = gates_module.run_cw_cli(tmp_path, ["review", "a", "x"])
+        gone = gates_module.run_cw_cli(tmp_path, ["review", "b"])
+        then = gates_module.run_cw_cli(tmp_path, ["review", "b"])
+
+        assert first is not None
+        assert first.stdout == "review|a|x"
+        assert gone is None
+        assert then is not None
+        assert then.returncode == 1
+        assert len(fake.calls) == 3
+
+    def test_signoff_render_echo_mirrors_the_unchanged_exit(
+        self, tmp_path: Path
+    ) -> None:
+        body = tmp_path / "body.md"
+        current = tmp_path / "current.md"
+        args = ["--body-file", str(body), "--current-body-file", str(current)]
+        body.write_text("same\r\n\n", encoding="utf-8")
+        current.write_text("same\n", encoding="utf-8")
+
+        assert signoff_render_echo(args) == GhReply(3, "", "")
+
+    def test_signoff_render_echo_prints_a_changed_body(self, tmp_path: Path) -> None:
+        body = tmp_path / "body.md"
+        current = tmp_path / "current.md"
+        body.write_text("new\n", encoding="utf-8")
+        current.write_text("old\n", encoding="utf-8")
+        args = ["--body-file", str(body), "--current-body-file", str(current)]
+
+        assert signoff_render_echo(args) == GhReply(0, "new\n", "")
 
     def test_stub_cw_cli_answers_by_longest_prefix_and_records_calls(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
