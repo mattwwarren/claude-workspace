@@ -15,7 +15,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -563,6 +563,37 @@ def test_gate_worktree_is_removed_on_normal_exit(repo: Path, tmp_path: Path) -> 
     assert str(path) not in git_in(repo, "worktree", "list")
 
 
+def test_gate_worktree_honors_prefix_and_leftover(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    real_run_git = gate.run_git
+
+    def _keep(args: list[str], **kwargs: Any) -> Any:
+        if "remove" in args:
+            return subprocess.CompletedProcess(args, 0, "", "")
+        return real_run_git(args, **kwargs)
+
+    monkeypatch.setattr(gate, "run_git", _keep)
+    monkeypatch.setattr(shutil, "rmtree", lambda *_a, **_k: None)
+    caplog.set_level(logging.WARNING, logger=gate.__name__)
+    with gate.gate_worktree(
+        repo,
+        _snap(repo),
+        root=str(root),
+        ticket="T-2",
+        prefix="cw-gate-wt-finalize-",
+        leftover="finalize_base_worktree_leftover",
+    ) as path:
+        assert path.name.startswith("cw-gate-wt-finalize-")
+    assert f"finalize_base_worktree_leftover ticket=T-2 path={path}" in caplog.text
+    assert "impl_gate4_worktree_leftover" not in caplog.text
+
+
 def test_gate_worktree_cleanup_keeps_other_worktrees_registered(
     repo: Path, tmp_path: Path
 ) -> None:
@@ -646,6 +677,10 @@ def test_parse_mypy_errors_on_the_real_capture() -> None:
         ("main.py", 6, "attr-defined"),
     ]
     assert errors[0].text.startswith("pkg/helper.py:2: error: Incompatible return")
+    assert errors[3].message == '"int" has no attribute "missing"'
+    assert errors[0].message == (
+        'Incompatible return value type (got "int", expected "str")'
+    )
 
 
 def test_parse_mypy_errors_with_columns_matches_the_plain_capture() -> None:

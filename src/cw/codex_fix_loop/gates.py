@@ -207,6 +207,7 @@ class GateFailure:
     seconds: float
     output: str
     why: str | None
+    full_output: str = field(default="", repr=False, compare=False)
 
 
 class _Watched(NamedTuple):
@@ -446,11 +447,11 @@ def _run_watched(
     signal to the child on any path: if cw's own thread is torn down by an
     exception while waiting, the exception propagates unchanged and the child
     runs to completion against its own descriptor. No ``with Popen``: its exit
-    can wait on, or interrupt, the child. *helper* collects the full output
-    for the caller to parse instead of logging it line by line.
+    can wait on, or interrupt, the child. The full output is always returned;
+    *helper* only stops it being logged line by line.
     """
     start = time.monotonic()
-    out = _Output(scope=scope, gate=gate, log=not helper, chunks=[] if helper else None)
+    out = _Output(scope=scope, gate=gate, log=not helper, chunks=[])
     with tempfile.TemporaryFile("a+b") as spool:
         proc = subprocess.Popen(
             argv,
@@ -668,6 +669,7 @@ def _run_one_gate(
             seconds=watched.seconds,
             output=output,
             why=None,
+            full_output=watched.text,
         )
     if dirtied:
         return GateFailure(
