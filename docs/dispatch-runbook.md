@@ -4888,7 +4888,7 @@ pushes. cw does everything else:
     tracked states the baseline file may not gain lines since the fork point
     (a growth parks, "a suppression that needs explicit approval"), even when
     no Python file was touched. To declare a baseline, put the `uv run`
-    pipeline (for example `uv run mypy src/ | mypy-baseline filter`) in the
+    pipeline (for example `uv run mypy src/ | uv run mypy-baseline filter`) in the
     repo's CLAUDE.md `## Quality Gates` block so `detect-gates` reports it.
   - *Mypy attribution (no baseline).* Exit 0 passes. Any `error:` diagnostic in
     a touched file parks with those lines, the quoted rule "fix every mypy
