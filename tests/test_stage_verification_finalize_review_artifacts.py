@@ -194,11 +194,13 @@ def _ui_commit(made: Rig) -> None:
 
 def _parse(argv: list[str]) -> None:
     """Parse *argv* (``review ...``) under the real click command, no invoke."""
+    assert argv[0] == "review", argv
     command: click.Command = review
-    rest = list(argv)
+    rest = argv[1:]
     while rest and isinstance(command, click.Group) and rest[0] in command.commands:
-        name = rest.pop(0)
-        command = command.commands[name]
+        command = command.commands[rest.pop(0)]
+    # A group accepts any trailing words, so stopping on one would check nothing.
+    assert not isinstance(command, click.Group), argv
     command.make_context(command.name or "", rest, resilient_parsing=False)
 
 
@@ -242,6 +244,20 @@ class TestArgv:
         assert len(rig.cw.calls) == 3
         for argv in rig.cw.calls:
             _parse(argv)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            ["debt", "file"],
+            ["debt", "link-pr"],
+            ["debt", "emit"],
+            ["debt", "record"],
+            ["signoff", "render"],
+        ],
+    )
+    def test_the_argv_check_rejects_an_unknown_option(self, command: list[str]) -> None:
+        with pytest.raises(click.NoSuchOption):
+            _parse(["review", *command, "--no-such-option", "x"])
 
     def test_the_mcp_hint_commands_parse_under_the_real_click_command(
         self, rig: Rig
