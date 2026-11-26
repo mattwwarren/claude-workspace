@@ -3,7 +3,8 @@
 One write-capable ``codex exec`` turn edits the ticket worktree and returns a
 framed sentinel; it never stages, commits or pushes. cw, outside the turn, does
 everything else: the file fence and growth guard, gate 1 (empty diff), gate 2
-(plan scope conformance), the repo's quality gates, the one commit (carrying
+(plan scope conformance), the repo's quality gates, gate 4 (ruff and mypy on
+the touched Python files, #3531), the one commit (carrying
 the ``Auto-Dev-Stage: impl-complete`` trailer), the push and tip verification,
 the cw-stamped sentinel, the stage events and the completion door.
 
@@ -16,7 +17,9 @@ check and merge adoption, #3529), :mod:`cw.stage_verification.impl_gates` (the
 guards, gates and
 breach mappers), :mod:`cw.stage_verification.impl_feedback` (the live-PR bind and the
 default-branch
-merge) and :mod:`._run` (the ordered flow, :func:`run_impl_stage_and_complete`).
+merge), :mod:`._type_gate` (gate 4's command runs, with its harness-neutral pieces
+in :mod:`cw.stage_verification.impl_type_gate`) and :mod:`._run` (the ordered
+flow, :func:`run_impl_stage_and_complete`).
 It composes the stage-neutral :mod:`cw.codex_fix_loop` primitives and calls
 neither ``_run_fix_and_commit`` nor ``_commit_fix_cycle``.
 """

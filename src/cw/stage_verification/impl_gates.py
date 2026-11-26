@@ -11,9 +11,10 @@ Gate order, as :mod:`cw.codex_impl._run` calls them: the pre-turn guards
 (:func:`check_plan_present`, :func:`check_on_branch`; the existing-branch-work
 classification is :func:`cw.stage_verification.impl_resume.plan_reentry`), then
 after the turn gate 1 (:func:`check_empty_diff`), the fence, gate 2
-(:func:`run_scope_conformance`) and the repo's quality gates
+(:func:`run_scope_conformance`), the repo's quality gates
 (:func:`run_quality_gates`, which accepts a red gate's rewrite of its own
-touched files after one green re-run, #3686).
+touched files after one green re-run, #3686) and gate 4 (ruff and mypy on the
+touched Python files, :mod:`cw.codex_impl._type_gate`, #3531).
 """
 
 from __future__ import annotations
