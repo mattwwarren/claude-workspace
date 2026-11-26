@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 from dataclasses import dataclass, field, replace
@@ -391,13 +392,37 @@ def _revert(attempt: _Attempt) -> str | None:
     return None
 
 
+def _left_local_note(attempt: _Attempt, why: str, merge_sha: str) -> str:
+    """What a refused revert left behind and the command to finish it by hand.
+
+    Not passed through the posted-text caps: a cut command is worse than a long
+    line, and only *why* carries subprocess output (already capped).
+    """
+    head = _local_head(attempt.worktree)
+    moved = "" if head == merge_sha else f" (HEAD is now {head or '(unreadable)'})"
+    worktree = shlex.quote(str(attempt.worktree))
+    return (
+        f"NOT reverted ({redact_and_cap(why)}): the merge commit"
+        f" {merge_sha or '(unreadable)'} is left in the local worktree only{moved}."
+        f" Confirm {attempt.branch} is checked out in {attempt.worktree} and"
+        " inspect it; if it is this run's merge, run"
+        f' "git -C {worktree} reset --hard {attempt.pre_merge}" by hand'
+        " (commits above the merge would be lost), then requeue finalize"
+    )
+
+
 def _gate_park(
     attempt: _Attempt,
     gated: FinalizeGateRun,
     categories: str,
     conflicted: Sequence[str],
+    *,
+    merge_sha: str,
 ) -> FinalizeBlock:
-    """The gate-failure park: reverted, or a note naming the merge left local."""
+    """The gate-failure park: reverted, or a note naming the merge left local.
+
+    *merge_sha* is the commit this run made, read before the gates ran.
+    """
     block = gated.block
     if gated.failed_gate:
         what = (
@@ -406,7 +431,6 @@ def _gate_park(
     else:
         details = block.details if block is not None else "no reason recorded"
         what = f"the quality gates could not run: {redact_and_cap(details)}"
-    merge_sha = _local_head(attempt.worktree)
     try:
         why = _revert(attempt)
     except _GIT_ERRORS as exc:
@@ -415,16 +439,8 @@ def _gate_park(
     if why is None:
         parked = _noted(attempt.park, f"{note}; reverted")
     else:
-        parked = replace(
-            _noted(
-                attempt.park,
-                f"{note}; NOT reverted ({redact_and_cap(why)}): the merge commit"
-                f" {merge_sha or '(unreadable)'} is left in the local worktree only."
-                f' Inspect it, run "git reset --hard {attempt.pre_merge}" by hand'
-                " if it is this run's merge, then requeue finalize",
-            ),
-            retry_eligible=False,
-        )
+        left = _left_local_note(attempt, why, merge_sha)
+        parked = replace(_noted(attempt.park, f"{note}; {left}"), retry_eligible=False)
     return _noted(parked, f"conflicted files: {redact_and_cap(', '.join(conflicted))}")
 
 
@@ -498,11 +514,13 @@ def _after_conflict(
     committed = _commit(attempt, resolved, conflicted)
     if committed is not None:
         return ResolveOutcome(committed)
+    merge_sha = _local_head(attempt.worktree)
     gated = run_gates()
     if gated.block is not None:
-        return ResolveOutcome(
-            _gate_park(attempt, gated, resolved.categories, conflicted)
+        parked = _gate_park(
+            attempt, gated, resolved.categories, conflicted, merge_sha=merge_sha
         )
+        return ResolveOutcome(parked)
     return _publish(attempt, classifier_ran=True, conflicted=conflicted)
 
 

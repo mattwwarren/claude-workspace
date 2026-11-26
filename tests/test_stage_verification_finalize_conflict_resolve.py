@@ -543,7 +543,10 @@ def test_a_gate_that_moved_head_is_not_reverted(repo: Repo) -> None:
     repo.ours_and_theirs(_DOC, "ours\n", "theirs\n")
     pre = repo.head()
 
+    merged: list[str] = []
+
     def _moving_gate() -> FinalizeGateRun:
+        merged.append(repo.head())
         commit_tracked_file(repo.worktree, "gate-wrote.py")
         return _red()
 
@@ -555,10 +558,17 @@ def test_a_gate_that_moved_head_is_not_reverted(repo: Repo) -> None:
     assert block.retry_eligible is False
     assert "; reverted" not in block.details
     assert f"NOT reverted (HEAD^1 is not the pre-merge commit {pre})" in block.details
-    assert f"the merge commit {moved} is left in the local worktree only" in (
-        block.details
+    assert moved != merged[0]
+    assert (
+        f"the merge commit {merged[0]} is left in the local worktree only "
+        f"(HEAD is now {moved})" in block.details
     )
-    assert f'run "git reset --hard {pre}" by hand' in block.details
+    assert (
+        f"Confirm {_BRANCH} is checked out in {repo.worktree} and inspect it"
+        in block.details
+    )
+    assert f'run "git -C {repo.worktree} reset --hard {pre}" by hand' in block.details
+    assert "commits above the merge would be lost" in block.details
 
 
 def test_a_failed_reset_is_not_reverted(
@@ -588,14 +598,19 @@ def test_a_branch_switch_is_not_reverted(repo: Repo) -> None:
     install_real_guard_script(resolve.CLASSIFIER_SCRIPT_NAME)
     repo.ours_and_theirs(_DOC, "ours\n", "theirs\n")
 
+    merged: list[str] = []
+
     def _switching_gate() -> FinalizeGateRun:
-        git_in(repo.worktree, "checkout", "-q", "-b", "elsewhere")
+        merged.append(repo.head())
+        git_in(repo.worktree, "checkout", "-q", "-b", "elsewhere", "HEAD^1")
         return _red()
 
     outcome = _resolve(repo, run_gates=_switching_gate)
     assert outcome.block is not None
     assert f"no longer has {_BRANCH!r} checked out" in outcome.block.details
     assert outcome.block.retry_eligible is False
+    assert f"the merge commit {merged[0]} is left" in outcome.block.details
+    assert f"(HEAD is now {repo.head()})" in outcome.block.details
 
 
 # -- push and re-check -----------------------------------------------------------
