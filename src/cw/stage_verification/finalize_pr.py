@@ -101,7 +101,8 @@ OVERRIDE_HEADING: Final = "## Operator override"
 #: marker; a marker quoted mid-line (in finding text) ends nothing.
 # Why: unheaded text under cw's last ``## `` section is deliberately part of
 # that region (plan 2.2/2.8, documented in docs/dispatch-runbook.md).
-_NEXT_REGION: Final = re.compile(r"\n(?:## |[ \t]*<!-- cw-review-signoff:)")
+_SIGNOFF_PREFIX: Final = "<!-- cw-review-signoff:"
+_NEXT_REGION: Final = re.compile(rf"\n(?:## |[ \t]*{re.escape(_SIGNOFF_PREFIX)})")
 #: A model's own override heading line, however it is cased or suffixed.
 _OVERRIDE_TITLE: Final = re.compile(r"## operator override\b", re.IGNORECASE)
 
@@ -367,18 +368,29 @@ def apply_body_section(body: str, section: str, *, heading: str) -> str:
     return joined + ("\n\n" + tail.lstrip() if tail.strip() else "\n")
 
 
+def _contained(line: str) -> str:
+    """*line*, unable to end a region or to be read as a sign-off marker."""
+    if line.startswith("## "):
+        return f"#{line}"
+    # lstrip(), not the region rule's [ \t]*: marker readers strip any whitespace.
+    if line.lstrip().startswith(_SIGNOFF_PREFIX):
+        return f"> {line}"
+    return line
+
+
 def _normalized_override(section: str) -> str:
-    """*section* as one region: the exact heading line and no later ``## `` line.
+    """*section* as one region: the exact heading line and no line that ends it.
 
     The text is model-written (or the override JSON). A suffixed or differently
-    cased heading does not match the region and a later ``## `` line ends it
-    early; either way :func:`strip_cw_regions` would leave cw's own override
-    text in the media check, which could then arm auto-merge on it.
+    cased heading does not match the region, and a later ``## `` line or sign-off
+    marker line ends it early; either way :func:`strip_cw_regions` would leave
+    cw's own override text in the media check, which could then arm auto-merge
+    on it.
     """
     lines = section.strip().splitlines()
     if lines and _OVERRIDE_TITLE.match(lines[0]):
         del lines[0]
-    rest = "\n".join(f"#{line}" if line.startswith("## ") else line for line in lines)
+    rest = "\n".join(_contained(line) for line in lines)
     return f"{OVERRIDE_HEADING}\n\n" + rest.strip("\n")
 
 

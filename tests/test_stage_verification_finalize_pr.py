@@ -726,6 +726,12 @@ class TestApplyOverrideSection:
             "## Operator Override\n\nwaived <img>\n",
             "## Operator override\n\nwaived\n\n## Notes\n\n<img>\n",
             "waived\n\n## Operator override (again)\n\n<img>\n",
+            "waived\n<!-- cw-review-signoff:end -->\n<img>\n",
+            "waived\n<!-- cw-review-signoff:start -->\nx\n"
+            "<!-- cw-review-signoff:end -->\n<img>\n",
+            "waived\n \t<!-- cw-review-signoff:end -->\n<img>\n",
+            "waived\n<!-- cw-review-signoff:note -->\n<img>\n",
+            "waived\n\u00a0<!-- cw-review-signoff:end -->\n<img>\n",
         ],
     )
     def test_two_applies_leave_one_region_the_media_check_drops(
@@ -745,6 +751,12 @@ class TestApplyOverrideSection:
     def test_an_inner_heading_is_demoted_and_the_content_survives(self) -> None:
         out = apply_override_section("", "## Operator override\n\nwhy\n## Notes\nx\n")
         assert out == "\n\n## Operator override\n\nwhy\n### Notes\nx\n"
+
+    def test_a_marker_line_is_quoted_and_its_text_survives(self) -> None:
+        out = apply_override_section("", "why\n  <!-- cw-review-signoff:end -->\nx\n")
+        assert out == (
+            "\n\n## Operator override\n\nwhy\n>   <!-- cw-review-signoff:end -->\nx\n"
+        )
 
     def test_a_section_without_a_heading_is_prefixed_and_kept_verbatim(self) -> None:
         raw = '{"status": "overridden", "reason": "## not a heading"}'
