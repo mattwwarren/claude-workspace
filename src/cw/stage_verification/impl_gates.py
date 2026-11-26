@@ -316,13 +316,17 @@ def _drift_block(verdict: dict[str, Any] | None, stderr: str) -> ImplBlock:
             "the scope-conformance script exited 1 without a valid JSON verdict "
             f"(a tooling failure, not drift): {tail}",
         )
-    extras = [redact_and_cap(str(path)) for path in verdict.get("extra_files") or []]
+    raw_paths = [str(path) for path in verdict.get("extra_files") or []]
+    extras = [redact_and_cap(path) for path in raw_paths]
+    display_only = (
+        "\nScope paths were altered for display." if extras != raw_paths else ""
+    )
     allowed_extra = redact_and_cap(str(verdict.get("allowed_extra")))
     return ImplBlock(
         PLAN_SCOPE_DRIFT_BLOCKER_REASON,
         f"the delivered diff touches {len(extras)} file(s) beyond the plan's "
         f"Files Modified allowance (allowed extra: {allowed_extra}). "
-        "extra_files:\n" + "\n".join(f"- {path}" for path in extras),
+        "extra_files:\n" + "\n".join(f"- {path}" for path in extras) + display_only,
     )
 
 

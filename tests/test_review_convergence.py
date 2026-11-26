@@ -1743,11 +1743,18 @@ class TestLedgerStore:
         path = tmp_path / LEDGER_RELATIVE_PATH
         save_ledger(path, ledger)
         assert load_ledger(path) == ledger
-        assert [p.name for p in path.parent.iterdir()] == ["review-convergence.json"]
+        assert {p.name for p in path.parent.iterdir()} == {
+            ".review-convergence.lock",
+            "review-convergence.json",
+        }
+        lock = path.parent / ".review-convergence.lock"
+        lock_identity = lock.stat().st_ino
         save_ledger(path, ledger.model_copy(update={"max_cycles": 3}))
         loaded = load_ledger(path)
         assert loaded is not None
         assert loaded.max_cycles == 3
+        assert lock.stat().st_ino == lock_identity
+        assert set(path.parent.iterdir()) == {lock, path}
 
     def test_missing_file_loads_as_none(self, tmp_path: Path) -> None:
         assert load_ledger(tmp_path / "nope.json") is None

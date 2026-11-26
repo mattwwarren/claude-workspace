@@ -59,12 +59,15 @@ from cw.review_convergence import (
     ResolvedBackend,
     RoundFinding,
     RoundInput,
+    bind_confirm_verdict,
     confirm_blocker_fragment,
     consecutive_confirm_failures,
     converged_across_tolerated_merge,
     decide_verdict,
     engine_supported,
     frozen_counts_from_verdict,
+    is_managed_convergence_path,
+    ledger_transaction,
     load_ledger,
     one_line,
     reconcile_for_init,
@@ -74,6 +77,7 @@ from cw.review_convergence import (
     render_history_comment,
     resolve_confirm_backend,
     round_input_findings,
+    round_verdict_path,
     save_ledger,
     save_round_verdict,
     sentinel_review_fragment,
@@ -572,6 +576,23 @@ def _write_out_verdict(out: Path, verdict: ReviewVerdict) -> None:
     atomic_write_text(out, verdict.model_dump_json(indent=2) + "\n")
 
 
+def _alternate_verdict_output(
+    out: Path | None, ledger: Path, round_number: int
+) -> Path | None:
+    if out is None:
+        return None
+    target = out.resolve()
+    if target == round_verdict_path(ledger.resolve(), round_number):
+        return None
+    # A copy must not write a different worktree's canonical evidence without
+    # holding its lock. The owning recorder is the only writer for that round.
+    destination = out.parent.resolve() / out.name
+    if any(is_managed_convergence_path(path) for path in (target, destination)):
+        msg = "--out-verdict cannot overwrite managed convergence evidence"
+        raise CwError(msg)
+    return out
+
+
 _DEFER_SHOULD_FIX_FLAG = "--defer-should-fix"
 
 
@@ -697,6 +718,11 @@ def converge_record_round(
         shards_reviewed=shards_reviewed,
         engine=round_ran_engine(payload),
     )
+    out = (
+        None
+        if payload.verdict is None
+        else _alternate_verdict_output(out_verdict, ledger_rel, report.round)
+    )
     # File the confirm deferrals before the commit point, so a re-run dedupes.
     file_confirm_deferrals(ledger, payload, findings, client, ticket, now=now)
     file_round_deferrals(ledger, payload, findings, now=now)
@@ -706,11 +732,16 @@ def converge_record_round(
     # crash before the commit leaves only files the next call rewrites at the
     # same names from the same ledger state (idempotent re-run); no reader
     # resolves a round the ledger does not list.
-    if payload.verdict is not None:
-        save_round_verdict(ledger_rel, report.round, payload.verdict)
-        if out_verdict is not None:
-            _write_out_verdict(out_verdict, payload.verdict)
-    save_ledger(ledger_rel, updated)
+    with ledger_transaction(ledger_rel) as locked:
+        if require_ledger(locked) != ledger:
+            msg = "convergence ledger changed while recording the round; retry"
+            raise CwError(msg)
+        if payload.verdict is not None:
+            save_round_verdict(locked, report.round, payload.verdict)
+            updated = bind_confirm_verdict(updated, report.round, payload.verdict)
+            if out is not None:
+                _write_out_verdict(out, payload.verdict)
+        save_ledger(locked, updated)
     announce_confirm_park(updated, report, client, ticket)
     click.echo(report.model_dump_json(indent=2))
 

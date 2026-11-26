@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 import click
 import yaml
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 
@@ -64,6 +64,7 @@ _SAFE_CLIENT_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 _SAFE_BRANCH_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$")
 
 _EMPTY_CLIENTS_DOC = "clients:\n"
+_STORE_SCHEMA_VERSION_ADAPTER: TypeAdapter[int] = TypeAdapter(int)
 
 
 def _lock_holder_command() -> str:
@@ -692,6 +693,14 @@ def get_client(name: str) -> ClientConfig:
     return _lookup_client(load_clients(), name)
 
 
+def _read_persisted_store(path: Path) -> object:
+    """Read JSON and validate its version before migration can overwrite it."""
+    raw = json.loads(path.read_text())
+    if isinstance(raw, dict) and (version := raw.get("schema_version")) is not None:
+        raw["schema_version"] = _STORE_SCHEMA_VERSION_ADAPTER.validate_python(version)
+    return raw
+
+
 def load_state() -> CwState:
     """Load persisted session state, migrating legacy schemas in memory.
 
@@ -702,8 +711,10 @@ def load_state() -> CwState:
         path = state_file()
         if not path.exists():
             return CwState()
-        raw = json.loads(path.read_text())
-        return CwState.model_validate(_config_migrate.migrate_cw_state(raw))
+        raw = _read_persisted_store(path)
+        if isinstance(raw, dict):
+            raw = _config_migrate.migrate_cw_state(raw)
+        return CwState.model_validate(raw)
 
 
 def save_state(state: CwState) -> None:
@@ -721,15 +732,24 @@ def save_state(state: CwState) -> None:
         atomic_write_text(path, state.model_dump_json(indent=2))
 
 
-def load_orchestrator_config() -> OrchestratorConfig:
-    """Load orchestrator.yaml, creating with defaults if missing."""
+def load_orchestrator_config(
+    *, create: bool = True, strict_root: bool = False
+) -> OrchestratorConfig:
+    """Load orchestrator.yaml, optionally requiring a mapping or empty document."""
     path = orchestrator_config_file()
     if not path.exists():
+        if not create:
+            return OrchestratorConfig()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(_DEFAULT_ORCHESTRATOR_YAML, encoding="utf-8")
-    raw = yaml.safe_load(_read_config_text(path))
-    if not raw:
+    content = _read_config_text(path)
+    raw = yaml.safe_load(content)
+    if not strict_root and not raw:
         return OrchestratorConfig()
+    if strict_root and raw is None:
+        node = yaml.compose(content, Loader=yaml.SafeLoader)
+        if node is None or node.start_mark.index == node.end_mark.index:
+            return OrchestratorConfig()
     try:
         return OrchestratorConfig.model_validate(raw)
     except ValidationError as exc:

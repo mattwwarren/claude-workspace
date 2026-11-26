@@ -232,7 +232,7 @@ def _clean_decision(ledger: ConvergenceLedger, kind: RoundKind) -> Decision:
     return DECISION_CONFIRM_REQUIRED if needs_confirm else DECISION_CLEAN
 
 
-def _operator_identities(findings: Sequence[RoundFinding]) -> list[FindingIdentity]:
+def _finding_identities(findings: Sequence[RoundFinding]) -> list[FindingIdentity]:
     """The distinct identities of *findings*, in first-seen order."""
     identities: list[FindingIdentity] = []
     for finding in findings:
@@ -256,7 +256,7 @@ def _operator_stop(
     names the carried gaps; with a new fix the fix goes first.
     """
     if classified.new_operator:
-        identities = _operator_identities(classified.new_operator)
+        identities = _finding_identities(classified.new_operator)
         return _Outcome(DECISION_STOP_OPERATOR_ACTION, STOP_OPERATOR_ACTION, identities)
     if held and not classified.new_fix:
         return _Outcome(DECISION_STOP_OPERATOR_ACTION, STOP_OPERATOR_ACTION, list(held))
@@ -490,6 +490,11 @@ def _apply_round(
         if route is not None and route.parks
         else _decide(ledger, classified, record, rounds, held_ids)
     )
+    if kind == "confirm" and outcome.decision == DECISION_CONTINUE:
+        record = record.model_copy(
+            update={"repair_identities": _finding_identities(classified.new_fix)}
+        )
+        rounds[-1] = record
     update: dict[str, object] = {
         "rounds": rounds,
         "settled": settled_after,

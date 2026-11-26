@@ -58,7 +58,8 @@ one-site edit instead of an N-site sweep across scattered assignments.
 
 **ADR-0019 — lock hierarchy.** The state-file locks are ranked
 (`sessions_lock`, then the STATE locks such as `dev_queue_lock`, then the
-leaf inbox and history locks) and acquired in non-decreasing rank;
+per-worktree review ledger lock, then the leaf inbox and history locks)
+and acquired in non-decreasing rank;
 ADR-0005's "`state_lock` → `dev_queue_lock`" order is the first instance. A
 shared guard (`cw._lock_guard`) turns a same-thread re-entry, which used to
 hang forever in `flock()`, into `CwLockReentrancyError`; rank violations raise
@@ -393,8 +394,9 @@ cites one of these.
     recorded exception (ADR-0014 `Clarification (#3256)`). — Source:
     `docs/adr/0014-timers-never-destroy-work.md`
 14. Lock discipline: state-file locks are acquired in non-decreasing rank
-    (`sessions_lock`, then STATE locks, then a leaf inbox/history lock, with
-    nothing taken under a leaf), a held lock is never re-entered, and no
+    (`sessions_lock`, then STATE locks, then the review ledger lock, then a
+    leaf inbox/history lock, with nothing taken under a leaf), a held lock is
+    never re-entered, and no
     subprocess runs under `sessions_lock` outside the ticket-tracked
     allowlist. — Source:
     `docs/adr/0019-lock-hierarchy-and-no-subprocess-under-sessions-lock.md`

@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
-import json
 from typing import TYPE_CHECKING
 
 from cw._flock import acquire_flock
@@ -20,6 +19,7 @@ from cw._lock_guard import LockRank, lock_guard
 from cw.atomic import atomic_write_text, rotate_backup
 from cw.config import (
     _guarded_state_lock,
+    _read_persisted_store,
     dev_plan_file,
     dev_plan_lock,
     dev_queue_file,
@@ -122,8 +122,10 @@ def load_dev_queue() -> DevQueueStore:
     path = dev_queue_file()
     if not path.exists():
         return DevQueueStore()
-    raw = json.loads(path.read_text())
-    return DevQueueStore.model_validate(migrate_dev_queue(raw))
+    raw = _read_persisted_store(path)
+    if isinstance(raw, dict):
+        raw = migrate_dev_queue(raw)
+    return DevQueueStore.model_validate(raw)
 
 
 def save_dev_queue(store: DevQueueStore) -> None:

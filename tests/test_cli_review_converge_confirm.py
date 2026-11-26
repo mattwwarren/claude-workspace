@@ -30,6 +30,7 @@ from cw.review_convergence import (
     RoundFinding,
     RoundInput,
     decide_confirm_verdict,
+    load_bound_round_verdict,
     load_ledger,
     round_verdict_path,
     verdict_ran_engine,
@@ -234,7 +235,12 @@ class TestPark:
         assert stored.status == "stopped"
         assert stored.fix_cycles_used == before.fix_cycles_used
         assert stored.fixed == []
-        assert round_verdict_path(_ledger_file(tmp_path), report["round"]).is_file()
+        last = stored.rounds[-1]
+        persisted = load_bound_round_verdict(
+            _ledger_file(tmp_path), last.round, last.verdict_sha256
+        )
+        assert persisted is not None
+        assert [finding.summary for finding in persisted.must_fix] == ["Real bug"]
         assert filings == []
 
     def test_the_event_and_friction_line(self, tmp_path: Path) -> None:
@@ -359,6 +365,52 @@ class TestFindingsFormRefusal:
 
 
 class TestVerdictDecisions:
+    @pytest.mark.parametrize(
+        "target", ["ledger", "verdict", "own-verdict", "lock", "alias", "link"]
+    )
+    def test_only_the_owning_round_writes_managed_evidence(
+        self, tmp_path: Path, target: str
+    ) -> None:
+        _engine_ledger(tmp_path)
+        own = _ledger_file(tmp_path)
+        other = tmp_path / "other" / ".cw" / "review-convergence.json"
+        out = {
+            "ledger": other,
+            "verdict": round_verdict_path(other, 2),
+            "own-verdict": round_verdict_path(own, 2),
+            "lock": other.with_name(".review-convergence.lock"),
+            "link": other,
+            "alias": other.parent.parent
+            / ".CW"
+            / "REVIEW-CONVERGENCE"
+            / "ROUND-2-VERDICT.JSON",
+        }[target]
+        before = own.read_bytes()
+        if target != "own-verdict":
+            out.parent.mkdir(parents=True)
+            if target == "link":
+                copy = out.with_name("copy.json")
+                copy.write_bytes(b"other evidence")
+                out.symlink_to(copy)
+            else:
+                out.write_bytes(b"other evidence")
+
+        verdict = engine_confirm_verdict(must_fix=["Real bug"])
+        result = _record(
+            tmp_path, engine_confirm_payload(verdict), "--out-verdict", str(out)
+        )
+
+        if target == "own-verdict":
+            assert result.exit_code == 0, result.output
+            assert out.exists()
+        else:
+            assert result.exit_code == 1, result.output
+            assert "cannot overwrite managed convergence evidence" in result.output
+            assert out.read_bytes() == b"other evidence"
+            assert out.is_symlink() == (target == "link")
+            assert own.read_bytes() == before
+            assert not round_verdict_path(own, 2).exists()
+
     def test_a_dropped_must_fix_is_decided_not_refused(
         self, tmp_path: Path, filings: list[DebtFilingCall]
     ) -> None:
@@ -506,6 +558,13 @@ class TestNoEngineRegression:
         assert result.exit_code == 0, result.output
         assert _report(result)["decision"] == "continue"
         assert _escalations() == []
+        last = _stored(tmp_path).rounds[-1]
+        assert (
+            load_bound_round_verdict(
+                _ledger_file(tmp_path), last.round, last.verdict_sha256
+            )
+            == verdict
+        )
 
 
 class TestPreRecordExits:

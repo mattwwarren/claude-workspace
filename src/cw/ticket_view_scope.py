@@ -12,28 +12,20 @@ from __future__ import annotations
 import shlex
 from typing import TYPE_CHECKING, Literal
 
-from cw.auto_dev_result import PLAN_SCOPE_DRIFT_BLOCKER_REASON
 from cw.dev_queue.next_commands import (
     SCOPE_DRIFT_PATHS_PLACEHOLDER,
     dev_queue_command,
     row_carries_human_opt_in,
 )
-from cw.models.enums import QueueItemStatus, Stage
+from cw.dev_queue.scope_drift_guard import is_scope_drift_park, scope_park_snapshot
 from cw.models.ticket_view import ScopeDecisionView
 from cw.scope_grants import parse_drift_extra_files
 
 if TYPE_CHECKING:
+    from cw.models import ClientConfig, Session
     from cw.models.tasks.ticket_task import TicketTask
 
 _HUMAN_PREFIX = "escalate to the human: "
-
-
-def _is_scope_drift_park(task: TicketTask) -> bool:
-    return (
-        task.status == QueueItemStatus.BLOCKED_ON_USER
-        and task.stage == Stage.IMPL
-        and task.blocked_reason == PLAN_SCOPE_DRIFT_BLOCKER_REASON
-    )
 
 
 def _carried_paths(task: TicketTask) -> list[str]:
@@ -49,7 +41,12 @@ def _carried_paths(task: TicketTask) -> list[str]:
 
 
 def build_scope_decision(
-    task: TicketTask, *, human_owner: bool, details: str | None
+    task: TicketTask,
+    *,
+    human_owner: bool,
+    details: str | None,
+    client_cfg: ClientConfig | None = None,
+    session: Session | None = None,
 ) -> ScopeDecisionView | None:
     """The decision view for a scope-drift park, or ``None`` outside one.
 
@@ -57,7 +54,7 @@ def build_scope_decision(
     not resolved again here. The owner is ``"human"`` when that opt-in or the
     row's own opt-in holds, otherwise ``"operator"``.
     """
-    if not _is_scope_drift_park(task):
+    if not is_scope_drift_park(task):
         return None
     owner: Literal["operator", "human"] = (
         "human" if human_owner or row_carries_human_opt_in(task) else "operator"
@@ -68,9 +65,13 @@ def build_scope_decision(
         "approve", task, "--scope-drift", paths_arg or SCOPE_DRIFT_PATHS_PLACEHOLDER
     )
     next_action = f"{_HUMAN_PREFIX}{command}" if owner == "human" else command
+    snapshot = scope_park_snapshot(
+        task, client_cfg, human_owner=owner == "human", session=session
+    )
     return ScopeDecisionView(
         owner=owner,
         carried_paths=_carried_paths(task),
         new_paths=new_paths,
         next_action=next_action,
+        park_token=None if snapshot is None else snapshot.token,
     )

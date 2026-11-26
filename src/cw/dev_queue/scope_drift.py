@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import ExitStack
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, TypedDict
 
@@ -30,6 +31,13 @@ from cw.dev_queue.approval import _resolve_approval_target
 from cw.dev_queue.lifecycle import _reset_for_same_stage_requeue
 from cw.dev_queue.next_commands import SCOPE_DRIFT_PATHS_PLACEHOLDER, dev_queue_command
 from cw.dev_queue.refusal import refusal_hint
+from cw.dev_queue.scope_drift_guard import (
+    PARK_CHANGED,
+    ScopeGrantNotAppliedError,
+    check_adopted_pr_head,
+    check_scope_park,
+    is_scope_drift_park,
+)
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.exceptions import ApproveGateError, CwError
@@ -54,6 +62,7 @@ from cw.scope_grants import (
 from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
+    from cw.dev_queue.scope_drift_guard import ScopeGrantExpectation
     from cw.models import DevQueueStore, TicketTask
 
 
@@ -159,6 +168,7 @@ def approve_scope_drift_ticket(
     *,
     bounded: bool = False,
     repo: str | None = None,
+    expected: ScopeGrantExpectation | None = None,
 ) -> ScopeDriftApproval:
     """Grant operator-directed scope growth to a ``plan_scope_drift`` park (#2337).
 
@@ -179,12 +189,19 @@ def approve_scope_drift_ticket(
         CwError: if no matching task is found.
     """
     facts = gather_grant_facts(client_name, repo)
-    with _lock(bounded=bounded):
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(_lock(bounded=bounded))
+        except (CwError, OSError, ValueError) as exc:
+            if expected is not None:
+                raise ScopeGrantNotAppliedError(PARK_CHANGED) from exc
+            raise
         return _approve_scope_drift_locked(
             ticket_id,
             client_name,
             extra_files,
             facts=facts,
+            expected=expected,
         )
 
 
@@ -249,6 +266,7 @@ def _approve_scope_drift_locked(
     extra_files: list[str],
     *,
     facts: GrantFacts | None = None,
+    expected: ScopeGrantExpectation | None = None,
 ) -> ScopeDriftApproval:
     """Lock-free body of :func:`approve_scope_drift_ticket`.
 
@@ -257,9 +275,55 @@ def _approve_scope_drift_locked(
     head lookup, runs before the first mutation, so a refusal leaves the row
     exactly as it was.
     """
-    store = load_dev_queue()
-    task = _resolve_approval_target(store, ticket_id, client_name, None)
+    try:
+        store = load_dev_queue()
+    except (OSError, ValueError) as exc:
+        if expected is not None:
+            raise ScopeGrantNotAppliedError(PARK_CHANGED) from exc
+        raise
+    task = _scope_drift_target(store, ticket_id, client_name, expected)
+    approved_files = sorted(set(extra_files))
+    _check_scope_drift_request(task, approved_files, guarded=expected is not None)
+    if facts is None:
+        if expected is not None:
+            raise ScopeGrantNotAppliedError(PARK_CHANGED)
+        facts = GrantFacts(
+            repo=None,
+            policy=review_policy_fingerprint(get_client(client_name).review),
+            actor="",
+        )
+    if expected is not None:
+        # Pin the ledger before sampling GitHub, then compare with fresh
+        # local inputs while both locks are still held.
+        with expected.lock_park(task) as read_park:
+            head_sha, base = check_adopted_pr_head(task, expected, facts.repo)
+            check_scope_park(read_park(), expected, approved_files, facts.policy, base)
+            return _record_scope_drift(store, task, approved_files, facts, head_sha)
+    head_sha = _grant_head(task, approved_files)
+    return _record_scope_drift(store, task, approved_files, facts, head_sha)
 
+
+def _scope_drift_target(
+    store: DevQueueStore,
+    ticket_id: str,
+    client_name: str,
+    expected: ScopeGrantExpectation | None,
+) -> TicketTask:
+    try:
+        task = _resolve_approval_target(store, ticket_id, client_name, None)
+    except CwError as exc:
+        if expected is not None:
+            raise ScopeGrantNotAppliedError(PARK_CHANGED) from exc
+        raise
+    if expected is not None and not is_scope_drift_park(task):
+        raise ScopeGrantNotAppliedError(PARK_CHANGED)
+    return task
+
+
+def _check_scope_drift_request(
+    task: TicketTask, approved_files: list[str], *, guarded: bool
+) -> None:
+    ticket_id = task.ticket_id
     if task.status != QueueItemStatus.BLOCKED_ON_USER:
         msg = (
             f"Cannot approve scope drift for ticket '{ticket_id}': status is"
@@ -282,12 +346,16 @@ def _approve_scope_drift_locked(
             f" {PLAN_SCOPE_DRIFT_BLOCKER_REASON!r}.{refusal_hint(task)}"
         )
         raise ApproveGateError(msg)
-    approved_files = sorted(set(extra_files))
+    retry = (
+        " Correct the paths in the original command, keeping both preconditions."
+        if guarded
+        else f" Retry: `{_scope_drift_command(task, SCOPE_DRIFT_PATHS_PLACEHOLDER)}`."
+    )
     if not approved_files:
         msg = (
             f"Cannot approve scope drift for ticket '{ticket_id}': no extra"
             " files given. Pass the repo-relative paths to allow, comma-separated."
-            f" Retry: `{_scope_drift_command(task, SCOPE_DRIFT_PATHS_PLACEHOLDER)}`."
+            f"{retry}"
         )
         raise ApproveGateError(msg)
 
@@ -298,20 +366,17 @@ def _approve_scope_drift_locked(
             " Pass exact repo-relative paths, comma-separated: no globs (* or ?),"
             " no directories or trailing /, no absolute paths, no '..' segments,"
             " no control characters or surrounding whitespace."
-            f" Retry: `{_scope_drift_command(task, SCOPE_DRIFT_PATHS_PLACEHOLDER)}`."
+            f"{retry}"
         )
         raise ApproveGateError(msg)
 
-    client_cfg = get_client(client_name)
-    grant_facts = (
-        facts
-        if facts is not None
-        else GrantFacts(
-            repo=None,
-            policy=review_policy_fingerprint(client_cfg.review),
-            actor="",
-        )
-    )
+
+def _grant_head(
+    task: TicketTask,
+    approved_files: list[str],
+) -> str:
+    ticket_id = task.ticket_id
+    client_cfg = get_client(task.client)
     branch = resolve_feature_branch(ticket_id, client_cfg, task)
     head_sha, _gh_available = branch_head_sha_on_origin(
         branch, cwd=_git_dir(client_cfg)
@@ -325,7 +390,17 @@ def _approve_scope_drift_locked(
             f" `{_scope_drift_command(task, ','.join(approved_files))}`."
         )
         raise ApproveGateError(msg)
+    return head_sha
 
+
+def _record_scope_drift(
+    store: DevQueueStore,
+    task: TicketTask,
+    approved_files: list[str],
+    grant_facts: GrantFacts,
+    head_sha: str,
+) -> ScopeDriftApproval:
+    ticket_id, client_name = task.ticket_id, task.client
     original_store = store.model_copy(deep=True)
     from_stage = task.stage.value
     task.scope_drift_approved_extra_files = approved_files

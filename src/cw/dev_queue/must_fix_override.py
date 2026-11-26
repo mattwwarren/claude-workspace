@@ -333,11 +333,9 @@ def _save_converged_ledger(
 ) -> None:
     """Persist the override-converged ledger, after the row save (#2834).
 
-    There is no ledger-level lock: ``dev_queue_lock`` does not cover
-    ``.cw/review-convergence.json``, and this read-modify-write would race any
-    other ledger writer. The guard is :func:`_require_codex_must_fix_park` (the
-    row is parked, so no live REVIEW worker owns the worktree), the same
-    exposure ``cw review converge operator-settle`` accepts. A failure leaves
+    The queue lock excludes guarded grants. The ledger save also takes the
+    per-ledger writer lock. :func:`_require_codex_must_fix_park` requires a
+    parked row, so no live REVIEW worker owns the worktree. A failure leaves
     the row stamped and the ledger unconverged: fail-closed (``verify-tip``
     still parks), and a rerun of the same command converges it.
     """

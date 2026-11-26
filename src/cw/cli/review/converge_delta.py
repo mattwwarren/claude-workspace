@@ -66,6 +66,7 @@ from cw.review_convergence import (
     assess_resolution_round,
     decide_verdict,
     from_verdict,
+    ledger_transaction,
     record_delta_round,
     rev_parse_or_none,
     save_ledger,
@@ -188,9 +189,6 @@ def _record(
     stale round number, letting the verdict file overwrite another round's.
     Any difference refuses with nothing recorded.
     """
-    if require_ledger(ledger_path) != ledger:
-        changed = "ledger changed during the review; nothing recorded"
-        raise DeltaRefusedError(changed)
     settled, _ = suppress_settled(ledger, verdict)
     decided = decide_verdict(settled, delta_defer_rationale(backend))
     findings, unread = from_verdict(decided)
@@ -206,8 +204,12 @@ def _record(
         shard_count=shard_count,
         shards_reviewed=shards_reviewed,
     )
-    save_round_verdict(ledger_path, report.round, decided)
-    save_ledger(ledger_path, updated)
+    with ledger_transaction(ledger_path) as locked:
+        if require_ledger(locked) != ledger:
+            changed = "ledger changed during the review; nothing recorded"
+            raise DeltaRefusedError(changed)
+        save_round_verdict(locked, report.round, decided)
+        save_ledger(locked, updated)
     if managed is not None:
         managed.recorded_ledger = ledger_digest(updated)
     return report

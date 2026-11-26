@@ -20,8 +20,9 @@ sit above ``cw.dev_queue``.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import UTC, datetime
-from functools import cached_property
+from functools import cached_property, partial
 from typing import TYPE_CHECKING, NamedTuple
 
 import yaml
@@ -33,8 +34,15 @@ from cw.config import (
     load_state,
 )
 from cw.dev_queue import _find_ticket, load_dev_queue, session_attention_state
+from cw.dev_queue.crud import resolve_client
 from cw.dev_queue.gate_backoff import gate_wait_released
-from cw.dev_queue.next_commands import next_commands
+from cw.dev_queue.next_commands import next_commands, row_carries_human_opt_in
+from cw.dev_queue.scope_drift_guard import (
+    PARK_CHANGED,
+    ScopeGrantNotAppliedError,
+    lock_scope_park,
+    scope_park_snapshot,
+)
 from cw.dispatch import TICK_STALE_SECONDS, resolve_hold_finalize, resolve_signoff
 from cw.events import read_events
 from cw.exceptions import CwError
@@ -65,10 +73,15 @@ from cw.reconcile._shared import (
     resolve_attempt_ceiling,
     resolve_session_for_task,
     session_daemon_liveness,
+    ticket_id_for_session,
 )
 from cw.ticket_view_scope import build_scope_decision
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from pathlib import Path
+
+    from cw.dev_queue.scope_drift_guard import ScopeParkReader, ScopeParkSnapshot
     from cw.lane_pause import LanePauseView
     from cw.models import (
         ClientConfig,
@@ -104,8 +117,9 @@ class ViewSources:
     event inbox, and a row with no bound session never reads the roster.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, config: OrchestratorConfig | None = None) -> None:
         self._clients: dict[str, ClientConfig | None] = {}
+        self._config = config
 
     @cached_property
     def roster_ids(self) -> set[str] | None:
@@ -114,7 +128,7 @@ class ViewSources:
 
     @cached_property
     def orchestrator_config(self) -> OrchestratorConfig:
-        return load_orchestrator_config()
+        return self._config if self._config is not None else load_orchestrator_config()
 
     @cached_property
     def concurrency_overrides(self) -> ConcurrencyOverrides:
@@ -283,7 +297,13 @@ def build_ticket_view(
         blocked_on_pr=None if task.blocked_on_pr is None else task.blocked_on_pr.number,
         blocked_on_repo=None if task.blocked_on_pr is None else task.blocked_on_pr.repo,
         blocker_details=details,
-        scope_decision=build_scope_decision(task, human_owner=opt_in, details=details),
+        scope_decision=build_scope_decision(
+            task,
+            human_owner=opt_in,
+            details=details,
+            client_cfg=client_cfg,
+            session=_scope_grant_session(task, session),
+        ),
         advisory_note=task.advisory_note,
         lane=task.lane,
         priority=task.priority,
@@ -321,6 +341,55 @@ def _blocker_details(session: Session | None) -> str | None:
         return None
     details = blocker.get("details")
     return details if isinstance(details, str) and details else None
+
+
+def _scope_grant_session(task: TicketTask, session: Session | None) -> Session | None:
+    if session is None or ticket_id_for_session(session.name) != task.ticket_id:
+        return None
+    return session
+
+
+@contextmanager
+def lock_scope_grant_park(
+    task: TicketTask, *, infer_client: bool = False
+) -> Iterator[ScopeParkReader]:
+    """Pin the bound ledger while the caller checks the live PR and park."""
+    try:
+        session = _scope_grant_session(
+            task, resolve_session_for_task(task, load_state())
+        )
+    except (CwError, OSError, ValueError) as exc:
+        raise ScopeGrantNotAppliedError(PARK_CHANGED) from exc
+    with lock_scope_park(task, session=session) as path:
+        yield partial(_read_locked_scope_park, task, path, infer_client=infer_client)
+
+
+def _read_locked_scope_park(
+    task: TicketTask, path: Path, *, infer_client: bool
+) -> ScopeParkSnapshot | None:
+    """Re-read local inputs after the GitHub lookup, before committing."""
+    try:
+        client = get_effective_client(task.client)
+        config = load_orchestrator_config(create=False, strict_root=True)
+        client_matches = (
+            not infer_client
+            or resolve_client(task.ticket_id, config, None) == task.client
+        )
+        session = resolve_session_for_task(task, load_state())
+        human_owner = resolve_human_opt_in(
+            task, client, config
+        ) or row_carries_human_opt_in(task)
+    except (CwError, OSError, ValueError, yaml.YAMLError):
+        return None
+    if not client_matches:
+        return None
+    return scope_park_snapshot(
+        task,
+        client,
+        human_owner=human_owner,
+        session=_scope_grant_session(task, session),
+        locked_path=path,
+    )
 
 
 def _session_view(

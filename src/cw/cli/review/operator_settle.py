@@ -34,6 +34,7 @@ It writes nothing to the dev-queue row.
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -62,6 +63,7 @@ from cw.models.enums import OrchestratorEventType
 from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
     SettleTarget,
+    ledger_transaction,
     operator_settle,
     operator_settle_event_payload,
     release_cause,
@@ -72,7 +74,11 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from cw.models import TicketTask
-    from cw.review_convergence import ConvergenceLedger, SettledEntry
+    from cw.review_convergence import (
+        ConvergenceLedger,
+        OperatorSettleReport,
+        SettledEntry,
+    )
 
 _SETTLE_IN_WORKER_MSG = (
     "Refusing to settle a review finding from inside a dispatch worker "
@@ -165,6 +171,56 @@ def _load_owned_ledger(path: Path, ticket_id: str) -> ConvergenceLedger:
     return ledger
 
 
+def _settle_locked(
+    target_path: Path,
+    ticket_id: str,
+    payload: _OperatorSettleInput,
+    *,
+    actor: str,
+    reason: str,
+    now: str,
+    outcome: str,
+) -> OperatorSettleReport:
+    with ExitStack() as stack:
+        try:
+            locked = stack.enter_context(ledger_transaction(target_path))
+        except FileNotFoundError as exc:
+            msg = (
+                f"no convergence ledger at {target_path};"
+                " run 'cw review converge init' first"
+            )
+            raise CwError(msg) from exc
+        except OSError as exc:
+            msg = f"cannot lock the convergence ledger at {target_path}: {exc}"
+            raise CwError(msg) from exc
+        ledger = _load_owned_ledger(locked, ticket_id)
+        try:
+            updated, report = operator_settle(
+                ledger,
+                payload.entries,
+                actor=actor,
+                reason=reason,
+                now=now,
+                outcome="defer" if outcome == "defer" else "reject",
+            )
+        except ValueError as exc:
+            raise CwError(str(exc)) from exc
+        if report.unmatched:
+            emit_json(
+                {
+                    "ledger": str(target_path),
+                    "written": False,
+                    "settled": [],
+                    "unmatched": [u.model_dump(mode="json") for u in report.unmatched],
+                    "releasable": release_cause(ledger) is not None,
+                    "hint": _UNMATCHED_HINT,
+                }
+            )
+            raise click.exceptions.Exit(1)
+        save_ledger(locked, updated)
+    return report
+
+
 @converge.command(name="operator-settle")
 @click.argument("path")
 @click.option("--ticket-id", required=True, help="The parked ticket to settle for.")
@@ -243,33 +299,15 @@ def converge_operator_settle(
     row = _find_ticket(load_dev_queue(), ticket_id, resolved_client)
     _require_parked(row)
     target_path = ledger_override or _row_ledger_path(row)
-    ledger = _load_owned_ledger(target_path, ticket_id)
-
-    try:
-        updated, report = operator_settle(
-            ledger,
-            payload.entries,
-            actor=actor,
-            reason=reason,
-            now=now,
-            outcome="defer" if outcome == "defer" else "reject",
-        )
-    except ValueError as exc:
-        raise CwError(str(exc)) from exc
-    if report.unmatched:
-        emit_json(
-            {
-                "ledger": str(target_path),
-                "written": False,
-                "settled": [],
-                "unmatched": [u.model_dump(mode="json") for u in report.unmatched],
-                "releasable": release_cause(ledger) is not None,
-                "hint": _UNMATCHED_HINT,
-            }
-        )
-        raise click.exceptions.Exit(1)
-
-    save_ledger(target_path, updated)
+    report = _settle_locked(
+        target_path,
+        ticket_id,
+        payload,
+        actor=actor,
+        reason=reason,
+        now=now,
+        outcome=outcome,
+    )
     _emit_operator_settle_events(report.settled, ticket_id)
     result: dict[str, object] = {
         "ledger": str(target_path),

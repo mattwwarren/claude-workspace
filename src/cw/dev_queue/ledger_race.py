@@ -11,8 +11,8 @@ time. The protocol every ledger writer uses is:
 
 ``cw review converge operator-settle`` (``cw.cli.review.operator_settle``) and
 the MUST_FIX override (``cw.dev_queue.must_fix_override``) both use these
-helpers. There is deliberately no ledger-level lock: a lock that only some
-writers take does not serialize the others.
+helpers. The ledger lock serializes writes, while this protocol checks that
+the caller is allowed to operate on the row.
 """
 
 from __future__ import annotations

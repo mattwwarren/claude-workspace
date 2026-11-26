@@ -125,7 +125,7 @@ def _coerce_session_origin(session_raw: dict[str, Any]) -> None:
     users aren't locked out of their own state.
     """
     origin = session_raw.get("origin")
-    if origin is not None and origin not in _VALID_SESSION_ORIGINS:
+    if isinstance(origin, str) and origin not in _VALID_SESSION_ORIGINS:
         logger.warning(
             "session %s has unknown origin %r; coercing to 'user'",
             session_raw.get("id", "<unknown>"),
