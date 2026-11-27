@@ -4061,7 +4061,7 @@ class TestSpawnCloseRequeue:
             "cw.cli.spawn.get_native_daemon_client", FakeNativeDaemonClient
         )
         monkeypatch.setattr(
-            "cw.dev_queue.requeue.get_native_daemon_client", lambda: roster
+            "cw.dev_queue.requeue.core.get_native_daemon_client", lambda: roster
         )
         return roster
 

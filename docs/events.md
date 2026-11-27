@@ -2833,9 +2833,9 @@ reach the reviewer — but the resolved REVIEW-stage executor backend cannot
 deliver operator tracker comments: `codex` paired with any tracker other
 than `github-issues`, or a backend with no comment-delivery path at all
 (`claude-native` always delivers). Namespaced by its owning module
-(`dev_queue/requeue.py`), same convention as `dispatch.scope_routing_decision`.
+(`dev_queue/requeue/`), same convention as `dispatch.scope_routing_decision`.
 This DEGRADES rather than blocks — `requeue_ticket` proceeds with the
-requeue regardless (`requeue.py`'s documented asymmetry: impl hard-exits on
+requeue regardless (`_apply_requeue_stage` in `requeue/stage_gate.py` documents the asymmetry: impl hard-exits on
 a missing plan, review/finalize degrade; #1730/#1717 comment 6 rejected a
 hard-fail guard here) — making this event the *only* signal that the
 operator's send-back never reached the reviewer. `backend`/`tracker` are

@@ -148,9 +148,12 @@ def test_impl_bypass_reads_the_row_branch_worktree(
     (worktree / ".cw" / "plan.md").write_text("plan\n", encoding="utf-8")
     checked_out = {"branch": expected}
     monkeypatch.setattr(
-        "cw.dev_queue.requeue._checked_out_branch", lambda _p: checked_out["branch"]
+        "cw.dev_queue.requeue.plan_guard._checked_out_branch",
+        lambda _p: checked_out["branch"],
     )
-    monkeypatch.setattr("cw.dev_queue.requeue._plan_body_signoff_ok", lambda _b: True)
+    monkeypatch.setattr(
+        "cw.dev_queue.requeue.plan_guard._plan_body_signoff_ok", lambda _b: True
+    )
     task = _row(branch)
 
     assert _impl_bypass_worktree_path(task, sample_client_config) == worktree

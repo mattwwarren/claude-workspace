@@ -83,7 +83,7 @@ _ALLOWLIST: Final[dict[str, int]] = {
     "cw/codex_legacy_recovery.py": 1,
     "cw/contract_manifest/_check.py": 1,
     "cw/contract_manifest/_stages.py": 1,
-    "cw/dev_queue/requeue.py": 2,
+    "cw/dev_queue/requeue/review_delivery.py": 2,
     "cw/dispatch/gating/context_json.py": 1,
     "cw/doctor/codex_fix_loop.py": 1,
     "cw/doctor/review_convergence.py": 2,
@@ -120,10 +120,13 @@ _TRACKER_ALLOWLIST: Final[dict[str, tuple[int, str]]] = {
         "plan fetch is GitHub-only: unresolved or GitHub may fetch, a known other "
         "tracker may not",
     ),
-    "cw/dev_queue/requeue.py": (
-        2,
-        "impl-bypass plan fetch (line 189) and review-reentry delivery "
-        "(line 481; follow-up debt)",
+    "cw/dev_queue/requeue/plan_guard.py": (
+        1,
+        "impl-bypass plan fetch (plan_guard._impl_bypass_plan_available)",
+    ),
+    "cw/dev_queue/requeue/review_delivery.py": (
+        1,
+        "review-reentry delivery (follow-up debt)",
     ),
     "cw/dispatch/claim/preflight_reach.py": (
         1,

@@ -122,7 +122,7 @@ class SettleRowOutcome(NamedTuple):
 def client_tracker(client: str) -> _ClientTracker:
     """Resolve *client*'s tracker with the strict GitHub polarity (R1).
 
-    The same root ``approve.py`` and ``requeue.py`` resolve it from (the
+    The same root ``approve.py`` and ``requeue`` resolve it from (the
     client's ``workspace_path``). An unconfigured client is not GitHub: fail
     closed. Public since #3041: ``cw review adjudicate``/``cw review debt``
     read the same polarity to pick the review-debt tracker mode.

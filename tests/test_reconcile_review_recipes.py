@@ -1942,7 +1942,9 @@ def test_auto_fix_ci_roster_unreadable_refusal_leaves_latch_armed(
     task = _seed_ci_failing_completed_row(tmp_config_dir)
     roster = FakeNativeDaemonClient()
     roster.roster_unreadable = True
-    monkeypatch.setattr("cw.dev_queue.requeue.get_native_daemon_client", lambda: roster)
+    monkeypatch.setattr(
+        "cw.dev_queue.requeue.core.get_native_daemon_client", lambda: roster
+    )
 
     acted = act_then_dispatch(
         _act_auto_fix_ci,

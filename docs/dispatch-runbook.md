@@ -3756,7 +3756,7 @@ round is forced.
   with the carry recorded, and any other file difference still invalidates it.
 
 **Release an unarmed repair.** The row is `COMPLETED` at FINALIZE, so
-`--stage review` is refused (a regress of a non-parked row, `requeue.py`; and
+`--stage review` is refused (a regress of a non-parked row, `_classify_requeue_move` in `requeue/stage_gate.py`; and
 `--from-completed --stage review` fails the same check). Use:
 
 ```bash
@@ -4578,7 +4578,7 @@ A review-stage requeue that cannot deliver comments degrades loudly
 proceeds — it **does not block the transition**. This is deliberate: `impl`
 hard-exits on a missing plan while `review` and `finalize` degrade, and a
 hard-fail guard here would invert that codified asymmetry (see
-`src/cw/dev_queue/requeue.py`'s `_apply_requeue_stage`). Watch for the event
+`src/cw/dev_queue/requeue/stage_gate.py`'s `_apply_requeue_stage`). Watch for the event
 with `cw event tail` after any send-back requeue; if it fires, the reviewer
 ran without your comment and its verdict should be read accordingly.
 

@@ -335,10 +335,21 @@ ignore = [
 # imports cw.review_approval back, so a top-level import is a cycle; it also
 # keeps the CLI verifier from loading cw.reconcile. Sanctioned mechanism (#3040).
 "src/cw/review_attestation_tolerance.py" = ["PLC0415"]
-# requeue defers cw.config.load_state|save_state|sessions_lock / cw.models
-# .ReapReason inside unblock_ticket. Preserved verbatim from the pre-split
-# flat module — not a cycle-break (cw.config never imports cw.dev_queue).
-"src/cw/dev_queue/requeue.py" = ["PLC0415"]
+# requeue/core defers the cw.executor import in precheck_requeue and
+# requeue_ticket: cw.executor imports back into cw.dev_queue (a cycle).
+# Preserved from the pre-split flat module (#3739).
+"src/cw/dev_queue/requeue/core.py" = ["PLC0415"]
+# requeue/live_session defers cw.reconcile.find_live_sessions_for_ticket: that
+# import cycles. Preserved verbatim from the pre-split flat module (#3739).
+"src/cw/dev_queue/requeue/live_session.py" = ["PLC0415"]
+# requeue/review_delivery defers cw.executor (the same cycle), cw.tracker and
+# cw.models.orchestrator_config inside _review_reentry_deliverable; only the
+# first breaks a cycle. Preserved from the pre-split flat module (#3739).
+"src/cw/dev_queue/requeue/review_delivery.py" = ["PLC0415"]
+# requeue/unblock defers cw.config.load_state|save_state|sessions_lock and
+# cw.models.ReapReason inside unblock_ticket. Preserved verbatim from the
+# pre-split flat module — not a cycle-break (cw.config never imports cw.dev_queue).
+"src/cw/dev_queue/requeue/unblock.py" = ["PLC0415"]
 # result defers the cli._hook_io import to break the cli <-> result circular
 # dependency; inline import is the sanctioned mechanism, not a workaround.
 "src/cw/result.py" = ["PLC0415"]

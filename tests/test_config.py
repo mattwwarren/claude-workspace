@@ -2450,7 +2450,7 @@ _BOUNDED_TRUE_ALLOWLIST: dict[tuple[str, str], int] = {
     # `cw spawn complete`: sessions_lock + nested dev_queue_lock (#2501)
     ("cw/cli/spawn.py", "_spawn_complete_impl"): 2,
     # `cw dev-queue unblock`: sessions_lock + nested _lock (#2501)
-    ("cw/dev_queue/requeue.py", "unblock_ticket"): 2,
+    ("cw/dev_queue/requeue/unblock.py", "unblock_ticket"): 2,
     # `cw ticket snapshot` / codex PLAN snapshot write (RFC 0019 T1, #3711): the
     # gh fetch and the content-addressed store write precede the lock; an orphan
     # store file is harmless. Never reached from dispatch_tick (no cw/dispatch entry).
@@ -2582,7 +2582,7 @@ _BOUNDED_FORWARDERS_ALLOWLIST: dict[tuple[str, str], int] = {
     ("cw/dev_queue/operator_constraints.py", "record_operator_constraint"): 1,
     ("cw/dev_queue/operator_constraints.py", "record_plan_constraints"): 1,
     ("cw/dev_queue/fix_handoff.py", "record_pending_fix_dispatch"): 1,
-    ("cw/dev_queue/requeue.py", "requeue_ticket"): 1,
+    ("cw/dev_queue/requeue/core.py", "requeue_ticket"): 1,
     ("cw/dev_queue/review_records.py", "record_finding_dispositions"): 1,
     # cw/_flock.py has NO entry by design: acquire_flock and
     # acquire_sessions_flock branch on ``bounded`` themselves, and the shared

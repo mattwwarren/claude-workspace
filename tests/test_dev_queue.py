@@ -11295,7 +11295,7 @@ class TestRequeueTicket:
         stub_fetch_plan(
             monkeypatch,
             plan_body(),
-            target="cw.dev_queue.requeue.fetch_approved_plan_comment",
+            target="cw.dev_queue.requeue.plan_guard.fetch_approved_plan_comment",
         )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess9002")
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -11362,7 +11362,7 @@ class TestRequeueTicket:
         stub_fetch_plan(
             monkeypatch,
             plan_body(),
-            target="cw.dev_queue.requeue.fetch_approved_plan_comment",
+            target="cw.dev_queue.requeue.plan_guard.fetch_approved_plan_comment",
         )
         events = capture_events(
             "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_STAGE_CHANGED
@@ -11643,7 +11643,7 @@ class TestRequeueTicket:
         stub_fetch_plan(
             monkeypatch,
             plan_body(),
-            target="cw.dev_queue.requeue.fetch_approved_plan_comment",
+            target="cw.dev_queue.requeue.plan_guard.fetch_approved_plan_comment",
         )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess9104")
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -11675,7 +11675,7 @@ class TestRequeueTicket:
         stub_fetch_plan(
             monkeypatch,
             plan_body(),
-            target="cw.dev_queue.requeue.fetch_approved_plan_comment",
+            target="cw.dev_queue.requeue.plan_guard.fetch_approved_plan_comment",
         )
         task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess9105")
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -11773,8 +11773,8 @@ class TestRequeueTicket:
     ) -> None:
         """#2421: the manual ``--regress`` path carries no blocker at all, so it
         measures MERGE_HEAD itself and stamps the same flag Rule 5a does."""
-        from cw.dev_queue import requeue as requeue_mod
         from cw.dev_queue import requeue_ticket
+        from cw.dev_queue.requeue import stage_gate as requeue_mod
 
         _write_client_yaml(tmp_config_dir, tmp_path)
         stub_worktree = tmp_path / "wt"
@@ -11811,8 +11811,8 @@ class TestRequeueTicket:
     ) -> None:
         """Only a FINALIZE-origin regress stamps the flag, so no other origin
         pays for the git probe."""
-        from cw.dev_queue import requeue as requeue_mod
         from cw.dev_queue import requeue_ticket
+        from cw.dev_queue.requeue import stage_gate as requeue_mod
 
         _write_client_yaml(tmp_config_dir, tmp_path)
 
@@ -12237,11 +12237,13 @@ class TestRequeueTicket:
         _write_client_yaml(tmp_config_dir, tmp_path)
         missing_wt = tmp_path / "no-such-worktree"
         monkeypatch.setattr(
-            "cw.dev_queue.requeue.worktree_path_for",
+            "cw.dev_queue.requeue.plan_guard.worktree_path_for",
             lambda _client, _branch: missing_wt,
         )
         stub_fetch_plan(
-            monkeypatch, None, target="cw.dev_queue.requeue.fetch_approved_plan_comment"
+            monkeypatch,
+            None,
+            target="cw.dev_queue.requeue.plan_guard.fetch_approved_plan_comment",
         )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-bypass-1")
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -12277,15 +12279,17 @@ class TestRequeueTicket:
         wt_path = tmp_path / "stale-worktree"
         wt_path.mkdir()
         monkeypatch.setattr(
-            "cw.dev_queue.requeue.worktree_path_for",
+            "cw.dev_queue.requeue.plan_guard.worktree_path_for",
             lambda _client, _branch: wt_path,
         )
         monkeypatch.setattr(
-            "cw.dev_queue.requeue._checked_out_branch",
+            "cw.dev_queue.requeue.plan_guard._checked_out_branch",
             lambda _wt_path: "some-other-branch",
         )
         stub_fetch_plan(
-            monkeypatch, None, target="cw.dev_queue.requeue.fetch_approved_plan_comment"
+            monkeypatch,
+            None,
+            target="cw.dev_queue.requeue.plan_guard.fetch_approved_plan_comment",
         )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-bypass-2")
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -12308,15 +12312,17 @@ class TestRequeueTicket:
         wt_path.mkdir()
         branch = "dev/GEN-500"
         monkeypatch.setattr(
-            "cw.dev_queue.requeue.worktree_path_for",
+            "cw.dev_queue.requeue.plan_guard.worktree_path_for",
             lambda _client, _branch: wt_path,
         )
         monkeypatch.setattr(
-            "cw.dev_queue.requeue._checked_out_branch",
+            "cw.dev_queue.requeue.plan_guard._checked_out_branch",
             lambda _wt_path: branch,
         )
         stub_fetch_plan(
-            monkeypatch, None, target="cw.dev_queue.requeue.fetch_approved_plan_comment"
+            monkeypatch,
+            None,
+            target="cw.dev_queue.requeue.plan_guard.fetch_approved_plan_comment",
         )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-bypass-3")
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -12342,11 +12348,11 @@ class TestRequeueTicket:
         (cw_dir / "plan.md").write_text(plan_body(), encoding="utf-8")
         branch = "dev/GEN-500"
         monkeypatch.setattr(
-            "cw.dev_queue.requeue.worktree_path_for",
+            "cw.dev_queue.requeue.plan_guard.worktree_path_for",
             lambda _client, _branch: wt_path,
         )
         monkeypatch.setattr(
-            "cw.dev_queue.requeue._checked_out_branch",
+            "cw.dev_queue.requeue.plan_guard._checked_out_branch",
             lambda _wt_path: branch,
         )
 
@@ -12355,7 +12361,8 @@ class TestRequeueTicket:
             raise AssertionError(msg)
 
         monkeypatch.setattr(
-            "cw.dev_queue.requeue.fetch_approved_plan_comment", _fail_if_called
+            "cw.dev_queue.requeue.plan_guard.fetch_approved_plan_comment",
+            _fail_if_called,
         )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-bypass-4")
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -12377,13 +12384,13 @@ class TestRequeueTicket:
         _write_client_yaml(tmp_config_dir, tmp_path)
         missing_wt = tmp_path / "no-such-worktree"
         monkeypatch.setattr(
-            "cw.dev_queue.requeue.worktree_path_for",
+            "cw.dev_queue.requeue.plan_guard.worktree_path_for",
             lambda _client, _branch: missing_wt,
         )
         stub_fetch_plan(
             monkeypatch,
             plan_body(),
-            target="cw.dev_queue.requeue.fetch_approved_plan_comment",
+            target="cw.dev_queue.requeue.plan_guard.fetch_approved_plan_comment",
         )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-bypass-5")
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -12407,13 +12414,13 @@ class TestRequeueTicket:
         _write_client_yaml(tmp_config_dir, tmp_path)
         missing_wt = tmp_path / "no-such-worktree"
         monkeypatch.setattr(
-            "cw.dev_queue.requeue.worktree_path_for",
+            "cw.dev_queue.requeue.plan_guard.worktree_path_for",
             lambda _client, _branch: missing_wt,
         )
         stub_fetch_plan(
             monkeypatch,
             plan_body(spec=False),
-            target="cw.dev_queue.requeue.fetch_approved_plan_comment",
+            target="cw.dev_queue.requeue.plan_guard.fetch_approved_plan_comment",
         )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-bypass-6")
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -12455,11 +12462,11 @@ class TestRequeueTicket:
         )
         missing_wt = tmp_path / "no-such-worktree"
         monkeypatch.setattr(
-            "cw.dev_queue.requeue.worktree_path_for",
+            "cw.dev_queue.requeue.plan_guard.worktree_path_for",
             lambda _client, _branch: missing_wt,
         )
         monkeypatch.setattr(
-            "cw.dev_queue.requeue.fetch_approved_plan_comment",
+            "cw.dev_queue.requeue.plan_guard.fetch_approved_plan_comment",
             self._assert_fetch_approved_plan_comment_not_called,
         )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-bypass-7a")
@@ -12489,11 +12496,13 @@ class TestRequeueTicket:
         _write_client_yaml(tmp_config_dir, tmp_path)
         missing_wt = tmp_path / "no-such-worktree"
         monkeypatch.setattr(
-            "cw.dev_queue.requeue.worktree_path_for",
+            "cw.dev_queue.requeue.plan_guard.worktree_path_for",
             lambda _client, _branch: missing_wt,
         )
         stub_fetch_plan(
-            monkeypatch, None, target="cw.dev_queue.requeue.fetch_approved_plan_comment"
+            monkeypatch,
+            None,
+            target="cw.dev_queue.requeue.plan_guard.fetch_approved_plan_comment",
         )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-bypass-7c")
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -12531,7 +12540,9 @@ class TestRequeueTicket:
             msg = "worktree_path_for must not be called for a same-stage requeue"
             raise AssertionError(msg)
 
-        monkeypatch.setattr("cw.dev_queue.requeue.worktree_path_for", _fail_if_called)
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue.plan_guard.worktree_path_for", _fail_if_called
+        )
         task = _make_blocked_task(stage=Stage.IMPL, session_id="sess-bypass-7")
         save_dev_queue(DevQueueStore(tasks=[task]))
 
@@ -12557,7 +12568,9 @@ class TestRequeueTicket:
             msg = "worktree_path_for must not be called for a review/finalize target"
             raise AssertionError(msg)
 
-        monkeypatch.setattr("cw.dev_queue.requeue.worktree_path_for", _fail_if_called)
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue.plan_guard.worktree_path_for", _fail_if_called
+        )
 
         task_review = _make_blocked_task(
             ticket_id="GEN-503", stage=Stage.PLAN, session_id="sess-bypass-8a"
@@ -12600,11 +12613,11 @@ class TestRequeueTicket:
         wt_path.mkdir()
         branch = "dev/GEN-500"
         monkeypatch.setattr(
-            "cw.dev_queue.requeue.worktree_path_for",
+            "cw.dev_queue.requeue.plan_guard.worktree_path_for",
             lambda _client, _branch: wt_path,
         )
         monkeypatch.setattr(
-            "cw.dev_queue.requeue._checked_out_branch",
+            "cw.dev_queue.requeue.plan_guard._checked_out_branch",
             lambda _wt_path: branch,
         )
 
@@ -12612,9 +12625,12 @@ class TestRequeueTicket:
             msg = "resolve_tracker/fetch_approved_plan_comment must not be called"
             raise AssertionError(msg)
 
-        monkeypatch.setattr("cw.dev_queue.requeue.resolve_tracker", _fail_if_called)
         monkeypatch.setattr(
-            "cw.dev_queue.requeue.fetch_approved_plan_comment", _fail_if_called
+            "cw.dev_queue.requeue.plan_guard.resolve_tracker", _fail_if_called
+        )
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue.plan_guard.fetch_approved_plan_comment",
+            _fail_if_called,
         )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-bypass-9a")
         client_cfg = get_client("genhealth")
@@ -12644,17 +12660,17 @@ class TestRequeueTicket:
         wt_path.mkdir()
         branch = "dev/GEN-500"
         monkeypatch.setattr(
-            "cw.dev_queue.requeue.worktree_path_for",
+            "cw.dev_queue.requeue.plan_guard.worktree_path_for",
             lambda _client, _branch: wt_path,
         )
         monkeypatch.setattr(
-            "cw.dev_queue.requeue._checked_out_branch",
+            "cw.dev_queue.requeue.plan_guard._checked_out_branch",
             lambda _wt_path: branch,
         )
         stub_fetch_plan(
             monkeypatch,
             plan_body(),
-            target="cw.dev_queue.requeue.fetch_approved_plan_comment",
+            target="cw.dev_queue.requeue.plan_guard.fetch_approved_plan_comment",
         )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-bypass-9b")
         client_cfg = get_client("genhealth")
@@ -12682,11 +12698,11 @@ class TestRequeueTicket:
         repo_path = tmp_path / "client-repo"
         repo_path.mkdir()
         monkeypatch.setattr(
-            "cw.dev_queue.requeue.worktree_path_for",
+            "cw.dev_queue.requeue.plan_guard.worktree_path_for",
             lambda _client, _branch: wt_path,
         )
         monkeypatch.setattr(
-            "cw.dev_queue.requeue._checked_out_branch",
+            "cw.dev_queue.requeue.plan_guard._checked_out_branch",
             lambda _wt_path: "dev/GEN-500",
         )
         seen_cwds: list[Path | None] = []
@@ -12696,7 +12712,7 @@ class TestRequeueTicket:
             return plan_body()
 
         monkeypatch.setattr(
-            "cw.dev_queue.requeue.fetch_approved_plan_comment", _fake_fetch
+            "cw.dev_queue.requeue.plan_guard.fetch_approved_plan_comment", _fake_fetch
         )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-bypass-cwd")
         client_cfg = get_client("genhealth").model_copy(update={"repo_path": repo_path})
@@ -12727,11 +12743,11 @@ class TestRequeueTicket:
         (cw_dir / "plan.md").write_text(plan_body(), encoding="utf-8")
         branch = "dev/GEN-500"
         monkeypatch.setattr(
-            "cw.dev_queue.requeue.worktree_path_for",
+            "cw.dev_queue.requeue.plan_guard.worktree_path_for",
             lambda _client, _branch: wt_path,
         )
         monkeypatch.setattr(
-            "cw.dev_queue.requeue._checked_out_branch",
+            "cw.dev_queue.requeue.plan_guard._checked_out_branch",
             lambda _wt_path: branch,
         )
 
@@ -12740,7 +12756,8 @@ class TestRequeueTicket:
             raise AssertionError(msg)
 
         monkeypatch.setattr(
-            "cw.dev_queue.requeue.fetch_approved_plan_comment", _fail_if_called
+            "cw.dev_queue.requeue.plan_guard.fetch_approved_plan_comment",
+            _fail_if_called,
         )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-bypass-9c")
         client_cfg = get_client("genhealth")
@@ -13554,7 +13571,7 @@ class TestPrecheckRequeue:
         def _no_event(*_args: object, **_kwargs: object) -> None:
             pytest.fail("precheck_requeue must not record an event")
 
-        monkeypatch.setattr("cw.dev_queue.requeue.record_event", _no_event)
+        monkeypatch.setattr("cw.dev_queue.requeue.core.record_event", _no_event)
         self._seed(tmp_config_dir, tmp_path, status, Stage.REVIEW)
         before = load_dev_queue().model_dump()
         flags = {flag: True} if flag is not None else {}
@@ -13621,7 +13638,7 @@ class TestRequeueReviewDeliveryDegrade:
         _write_client_yaml(tmp_config_dir, tmp_path)
         _stub_review_backend(monkeypatch, _SYNTHETIC_BACKEND, "github-issues")
         events = capture_events(
-            "cw.dev_queue.requeue",
+            "cw.dev_queue.requeue.core",
             OrchestratorEventType.REQUEUE_REVIEW_DELIVERY_DEGRADED,
         )
         task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess-degrade-1")
@@ -13653,7 +13670,7 @@ class TestRequeueReviewDeliveryDegrade:
         _write_client_yaml(tmp_config_dir, tmp_path)
         _stub_review_backend(monkeypatch, "codex", "linear")
         events = capture_events(
-            "cw.dev_queue.requeue",
+            "cw.dev_queue.requeue.core",
             OrchestratorEventType.REQUEUE_REVIEW_DELIVERY_DEGRADED,
         )
         task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess-degrade-2")
@@ -13681,7 +13698,7 @@ class TestRequeueReviewDeliveryDegrade:
         _write_client_yaml(tmp_config_dir, tmp_path)
         _stub_review_backend(monkeypatch, "codex", "github-issues")
         events = capture_events(
-            "cw.dev_queue.requeue",
+            "cw.dev_queue.requeue.core",
             OrchestratorEventType.REQUEUE_REVIEW_DELIVERY_DEGRADED,
         )
         task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess-degrade-3")
@@ -13706,7 +13723,7 @@ class TestRequeueReviewDeliveryDegrade:
         _write_client_yaml(tmp_config_dir, tmp_path)
         _stub_review_backend(monkeypatch, "claude-native", None)
         events = capture_events(
-            "cw.dev_queue.requeue",
+            "cw.dev_queue.requeue.core",
             OrchestratorEventType.REQUEUE_REVIEW_DELIVERY_DEGRADED,
         )
         task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess-degrade-4")
@@ -13731,7 +13748,7 @@ class TestRequeueReviewDeliveryDegrade:
         _write_client_yaml(tmp_config_dir, tmp_path)
         _stub_review_backend(monkeypatch, "codex", "linear")
         events = capture_events(
-            "cw.dev_queue.requeue",
+            "cw.dev_queue.requeue.core",
             OrchestratorEventType.REQUEUE_REVIEW_DELIVERY_DEGRADED,
         )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-degrade-5")
@@ -13755,7 +13772,7 @@ class TestRequeueReviewDeliveryDegrade:
         _write_client_yaml(tmp_config_dir, tmp_path)
         _stub_review_backend(monkeypatch, "codex", "linear")
         events = capture_events(
-            "cw.dev_queue.requeue",
+            "cw.dev_queue.requeue.core",
             OrchestratorEventType.REQUEUE_REVIEW_DELIVERY_DEGRADED,
         )
         task = _make_blocked_task(stage=Stage.FINALIZE, session_id="sess-degrade-6")
@@ -13785,10 +13802,10 @@ class TestRequeueReviewDeliveryDegrade:
         stub_fetch_plan(
             monkeypatch,
             plan_body(),
-            target="cw.dev_queue.requeue.fetch_approved_plan_comment",
+            target="cw.dev_queue.requeue.plan_guard.fetch_approved_plan_comment",
         )
         events = capture_events(
-            "cw.dev_queue.requeue",
+            "cw.dev_queue.requeue.core",
             OrchestratorEventType.REQUEUE_REVIEW_DELIVERY_DEGRADED,
         )
         task_impl = _make_blocked_task(
@@ -14284,7 +14301,7 @@ class TestDrainHeldTickets:
         stray = _seed_live_ticket_session("GEN-500")
         fake = _fake_daemon_with_live(_LIVE_SURFACE_REF)
         monkeypatch.setattr(
-            "cw.dev_queue.requeue.get_native_daemon_client", lambda: fake
+            "cw.dev_queue.requeue.core.get_native_daemon_client", lambda: fake
         )
 
         outcomes = drain_held_tickets("genhealth")
@@ -14325,7 +14342,7 @@ class TestDrainHeldTickets:
         fake = _fake_daemon_with_live()
         fake.roster_unreadable = True
         monkeypatch.setattr(
-            "cw.dev_queue.requeue.get_native_daemon_client", lambda: fake
+            "cw.dev_queue.requeue.core.get_native_daemon_client", lambda: fake
         )
 
         outcomes = drain_held_tickets("genhealth")
@@ -14783,7 +14800,7 @@ class TestCLIRequeue:
         stub_fetch_plan(
             monkeypatch,
             plan_body(),
-            target="cw.dev_queue.requeue.fetch_approved_plan_comment",
+            target="cw.dev_queue.requeue.plan_guard.fetch_approved_plan_comment",
         )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess6002")
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -14908,11 +14925,13 @@ class TestCLIRequeue:
         _write_client_yaml(tmp_config_dir, tmp_path)
         missing_wt = tmp_path / "no-such-worktree"
         monkeypatch.setattr(
-            "cw.dev_queue.requeue.worktree_path_for",
+            "cw.dev_queue.requeue.plan_guard.worktree_path_for",
             lambda _client, _branch: missing_wt,
         )
         stub_fetch_plan(
-            monkeypatch, None, target="cw.dev_queue.requeue.fetch_approved_plan_comment"
+            monkeypatch,
+            None,
+            target="cw.dev_queue.requeue.plan_guard.fetch_approved_plan_comment",
         )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-cli-bypass")
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -15085,7 +15104,7 @@ class TestCLIRequeue:
         stub_fetch_plan(
             monkeypatch,
             plan_body(),
-            target="cw.dev_queue.requeue.fetch_approved_plan_comment",
+            target="cw.dev_queue.requeue.plan_guard.fetch_approved_plan_comment",
         )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess6105")
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -20135,7 +20154,7 @@ class TestFinalizeLessLaneRefusals:
     ) -> None:
         """The concurrent-status branch re-reads a non-BLOCKED row, so no MUST_FIX
         rule can match there: the forwarding is pinned on the call itself."""
-        import cw.dev_queue.requeue as requeue_mod
+        import cw.dev_queue.requeue.unblock as requeue_mod
         from cw.dev_queue import unblock_ticket
         from cw.exceptions import UnblockStateError
         from cw.models import ReapReason
@@ -20213,7 +20232,7 @@ class TestUnblockRefusalsNameNextCommand:
         assert f"Run: `{_ACME_APPROVE}`" in str(exc.value)
 
     def test_concurrent_change(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import cw.dev_queue.requeue as requeue_mod
+        import cw.dev_queue.requeue.unblock as requeue_mod
         from cw.dev_queue import unblock_ticket
         from cw.exceptions import UnblockStateError
         from cw.models import ReapReason

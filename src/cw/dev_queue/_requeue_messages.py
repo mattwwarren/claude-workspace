@@ -1,9 +1,9 @@
 """Refusal-message builders for ``cw.dev_queue.requeue`` (#2692).
 
-Split out of ``requeue.py`` to keep that module under the ~1000-line ceiling
-once every requeue refusal named its legal next command. Imports nothing from
-``requeue`` (so no cycle); ``requeue`` re-imports every name here, so its
-module attributes are unchanged.
+Split out of the flat ``requeue`` module to keep it under the ~1000-line
+ceiling once every requeue refusal named its legal next command. Imports
+nothing from ``requeue`` (so no cycle); the ``requeue`` submodules import the
+names they use from here.
 """
 
 from __future__ import annotations

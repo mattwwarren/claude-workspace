@@ -106,7 +106,7 @@ _LOCK_MODULE = {
     "operator_resolutions": "cw.dev_queue.operator_resolutions._lock",
     "operator_constraints": "cw.dev_queue.operator_constraints._lock",
     "review_engine_allow": "cw.dev_queue.review_engine_allow._lock",
-    "requeue": "cw.dev_queue.requeue._lock",
+    "requeue": "cw.dev_queue.requeue.core._lock",
 }
 
 
@@ -295,7 +295,8 @@ class TestSingleCommandContention:
         command: str,
     ) -> None:
         monkeypatch.setattr(
-            "cw.dev_queue.requeue.get_native_daemon_client", lambda: mock_native_daemon
+            "cw.dev_queue.requeue.core.get_native_daemon_client",
+            lambda: mock_native_daemon,
         )
         monkeypatch.setattr(
             "cw.cli.dev_queue.crud.get_native_daemon_client", lambda: mock_native_daemon
