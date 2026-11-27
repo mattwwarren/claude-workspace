@@ -1,8 +1,12 @@
 """Live-session refusal for a requeue (#3739).
 
-Refuses while a worker still owns the ticket. ``load_state`` and
-``cw.native_daemon`` import at module level (neither imports ``cw.dev_queue``
-back); the ``cw.reconcile`` import stays deferred, because it cycles.
+Refuses while a worker still owns the ticket. ``load_state`` imports at module
+level (``cw.config`` never imports ``cw.dev_queue``). ``cw.native_daemon`` is
+imported only under ``TYPE_CHECKING``: ``NativeDaemonClient`` is annotation-only
+here, and the runtime ``get_native_daemon_client`` import is in
+``requeue/core.py``. ``_refuse_if_live_session`` imports
+``cw.reconcile.find_live_sessions_for_ticket`` inside the function, because a
+module-level import cycles.
 """
 
 from __future__ import annotations

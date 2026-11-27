@@ -1,4 +1,11 @@
-"""Salvage-park clearing: ``unblock_ticket`` (#3739)."""
+"""Salvage-park clearing: ``unblock_ticket`` (#3739).
+
+``unblock_ticket`` imports ``load_state``, ``save_state`` and ``sessions_lock``
+from ``cw.config``, and ``ReapReason`` from ``cw.models``, inside the function.
+Neither is a cycle break (``cw.config`` never imports ``cw.dev_queue``, and this
+module already imports ``cw.models`` at the top); they are carried over unchanged
+from the flat module.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,15 @@
-"""Review re-entry deliverability for a requeue (#3739)."""
+"""Review re-entry deliverability for a requeue (#3739).
+
+``_review_reentry_deliverable`` imports three things inside the function:
+
+* ``cw.executor.resolve_executor_config``: ``cw.executor`` imports back into
+  ``cw.dev_queue``, so a module-level import cycles.
+* ``cw.tracker`` (``resolve_tracker``, ``TRACKER_GITHUB_ISSUES``): not a cycle
+  break. The late binding lets tests patch ``cw.tracker.resolve_tracker`` at its
+  origin.
+* ``cw.models.orchestrator_config`` (the backend names): not a cycle break;
+  carried over unchanged from the flat module.
+"""
 
 from __future__ import annotations
 
@@ -42,9 +53,7 @@ def _review_reentry_deliverable(
     with no network I/O, so a consistent payload key set is worth more than
     skipping it.
 
-    Deferred import of ``resolve_executor_config`` to break the ``dev_queue ->
-    executor -> codex_background -> dev_queue`` cycle (same precedent as
-    ``unblock_ticket``'s deferred ``cw.config`` import, see module docstring).
+    The imports are function-local (the module docstring says why for each).
     NOTE for test authors: because these imports are function-local, tests must
     monkeypatch ``cw.executor.resolve_executor_config`` /
     ``cw.tracker.resolve_tracker`` at their origin modules, not this module --

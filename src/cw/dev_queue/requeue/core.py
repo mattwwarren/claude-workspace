@@ -1,4 +1,9 @@
-"""The requeue entry points: ``precheck_requeue`` and ``requeue_ticket`` (#3739)."""
+"""The requeue entry points: ``precheck_requeue`` and ``requeue_ticket`` (#3739).
+
+``precheck_requeue`` and ``requeue_ticket`` each import
+``cw.executor.resolve_pipeline_stages`` inside the function: ``cw.executor``
+imports back into ``cw.dev_queue``, so a module-level import cycles.
+"""
 
 from __future__ import annotations
 
@@ -234,10 +239,10 @@ def requeue_ticket(
         native_daemon=native_daemon or get_native_daemon_client(),
         ignore_session_ids=ignore_session_ids,
     )
-    # Deferred import of ``resolve_pipeline_stages`` to break the
-    # ``dev_queue -> executor -> codex_background -> dev_queue`` cycle (same
-    # precedent as ``_review_reentry_deliverable``'s deferred ``cw.executor``
-    # import above, see module docstring).
+    # Deferred import of ``resolve_pipeline_stages``: ``cw.executor`` imports
+    # back into ``cw.dev_queue``, so a module-level import cycles (same reason as
+    # ``_review_reentry_deliverable``'s deferred ``cw.executor`` import in
+    # ``requeue/review_delivery.py``).
     from cw.executor import resolve_pipeline_stages
 
     with _lock(bounded=bounded):
