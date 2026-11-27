@@ -25,6 +25,10 @@ from cw.opencode_runner import _supports_v1_flags
 from tests import _git_ceiling, _git_sandbox, _host_probe_guard, _tool_fakes
 from tests import _lock_invariants as lock_invariants
 from tests import _real_cw_guard as real_cw_guard
+from tests._cw_context_isolation import (
+    confine_context_discovery,
+    enter_dispatch_shaped_cwd,
+)
 from tests._shared.lock_helpers import _FakeClock
 from tests._shared.workflow_text import _REPO_ROOT
 
@@ -760,6 +764,28 @@ def _confine_git_discovery(
     strips ``GIT_*`` from its env. Logic: ``tests/_git_ceiling.py``.
     """
     _git_ceiling.install(monkeypatch, tmp_path_factory.getbasetemp())
+
+
+@pytest.fixture(autouse=True)
+def _dispatch_context_isolation(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """Start every non-integration test in a dispatch-shaped cwd (#3952).
+
+    The Python context walk is confined to the basetemp, and a worker
+    ``TMPDIR`` carrying a context is dropped, so ``tmp_path`` no longer
+    inherits the worker's headless context. The cwd is then a headless-shaped
+    context, so a test that does not choose its own cwd behaves as on a
+    worker. A test that needs another cwd ``chdir``s itself. Logic:
+    ``tests/_cw_context_isolation.py``.
+    """
+    if request.node.get_closest_marker("integration") is not None:
+        return
+    confine_context_discovery(monkeypatch, tmp_path_factory.getbasetemp())
+    enter_dispatch_shaped_cwd(monkeypatch, tmp_path / "_dispatch_cwd")
 
 
 @pytest.fixture(autouse=True)

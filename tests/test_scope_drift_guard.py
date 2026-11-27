@@ -651,7 +651,10 @@ def test_guard_requires_lossless_requested_paths(
     assert _park_files(ledger_path) == before
 
 
-def test_guard_flags_not_silently_ignored() -> None:
+def test_guard_flags_not_silently_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
     result = CliRunner().invoke(
         main, ["dev-queue", "approve", ACME_TICKET, "--expected-head", _HEAD]
     )

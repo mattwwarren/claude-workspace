@@ -18,8 +18,9 @@ The ceiling is the resolved pytest basetemp rather than the per-test
 checkout. A ceiling the caller already set is left alone.
 
 Limit: only filesystem walks that go through git are confined. Walks done in
-Python (``find_cw_context``, ``repo_root``) are not; their tests use the
-``ancestor_free_dir`` fixture instead.
+Python are not: ``find_cw_context`` is confined by
+``tests/_cw_context_isolation.py`` (#3952); ``repo_root`` tests still use the
+``ancestor_free_dir`` fixture, which is for real-filesystem walks.
 """
 
 from __future__ import annotations

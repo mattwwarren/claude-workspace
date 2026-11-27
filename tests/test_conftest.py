@@ -28,10 +28,14 @@ from unittest.mock import patch
 
 import psutil
 import pytest
+from click.testing import CliRunner
 from pydantic import ValidationError
 
 import cw.config
 from cw import native_daemon, queue_peek
+from cw.cli import _hook_io
+from cw.cli import main as cw_main
+from cw.cli._hook_io import find_cw_context
 from cw.config import load_state
 from cw.doctor import skills_drift, versions
 from cw.models import (
@@ -43,6 +47,8 @@ from cw.models import (
 from cw.opencode_runner import _supports_v1_flags
 from tests import _git_sandbox
 from tests import _real_cw_guard as real_cw_guard
+from tests._cli_review_helpers import _write_session_context
+from tests._cw_context_isolation import confine_context_discovery
 from tests._host_probe_guard import REAL_WHICH, LaunchRecorder, ToolLaunchBlockedError
 from tests._session_home import REAL_HOME, SESSION_HOME, wants_real_home
 from tests._shared.autouse_isolation import (
@@ -340,6 +346,64 @@ class TestSuiteWideRawGitGuard:
         drained = launch_recorder.drain()
         assert len(drained) == 1
         assert drained[0].kind == "git"
+
+
+class TestDispatchContextIsolation:
+    """The autouse ``_dispatch_context_isolation`` fixture (#3952)."""
+
+    def test_default_cwd_is_a_dispatch_worktree(self, tmp_path: Path) -> None:
+        cwd = Path.cwd().resolve()
+        assert cwd.is_relative_to(tmp_path.resolve())
+        context = _hook_io.find_cw_context(cwd)
+        assert context is not None
+        assert context["headless"] is True
+
+    def test_unchosen_cwd_refuses_approve_and_tmp_path_does_not(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        assert Path.cwd().resolve().is_relative_to(tmp_path.resolve())
+        argv = ["dev-queue", "approve", "T-1", "--expected-head", "a" * 40]
+        refused = CliRunner().invoke(cw_main, argv)
+        assert refused.exit_code == 1
+        assert "dispatch worker" in refused.output
+        monkeypatch.chdir(tmp_path)
+        allowed = CliRunner().invoke(cw_main, argv)
+        assert allowed.exit_code == 2
+        assert "require --scope-drift" in allowed.output
+
+    def test_the_ceiling_is_installed(self) -> None:
+        assert _hook_io.find_cw_context is not find_cw_context
+
+    def test_context_above_the_ceiling_does_not_leak(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        wt = tmp_path / "wt"
+        _write_session_context(wt, headless=True)
+        base = wt / ".cw" / "tmp" / "base"
+        monkeypatch.setenv("TMPDIR", str(wt / ".cw" / "tmp"))
+        confine_context_discovery(monkeypatch, base)
+        assert "TMPDIR" not in os.environ
+        assert _hook_io.find_cw_context(base / "t") is None
+        _write_session_context(base / "t", headless=False)
+        found = _hook_io.find_cw_context(base / "t")
+        assert found is not None
+        assert found["headless"] is False
+        outside = _hook_io.find_cw_context(wt)
+        assert outside is not None
+        assert outside["headless"] is True
+
+    def test_a_non_dispatch_tmpdir_is_kept(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        monkeypatch.setenv("TMPDIR", str(scratch))
+        confine_context_discovery(monkeypatch, tmp_path)
+        assert os.environ.get("TMPDIR") == str(scratch)
+
+    @pytest.mark.integration
+    def test_an_integration_test_keeps_its_cwd(self, tmp_path: Path) -> None:
+        assert not Path.cwd().resolve().is_relative_to(tmp_path.resolve())
 
 
 class TestSuiteWideRealCwGuard:
