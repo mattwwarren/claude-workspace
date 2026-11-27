@@ -38,9 +38,13 @@ Invariants:
         PR green before a release cut can still merge its bullet into the
         freshly released section). Every non-`[Unreleased]` section of REF's
         CHANGELOG must appear exactly once in the merged CHANGELOG with the
-        same text. Tag-independent: a tag lags the cut by its release
-        workflow's gates. Kind: `merge_changes_released_section`; detail
-        `removed`, `duplicated` or `changed`.
+        same text. Kind: `merge_changes_released_section`; detail `removed`,
+        `duplicated` or `changed`. One exception (#3540): a `changed` section
+        is accepted when the merged text equals the text its release tag
+        captured, so a PR can repair a section that already differs from its
+        tag. A tag that is missing or unreadable forgives nothing, and a
+        change away from the tag, a partial restoration, a `removed` or a
+        `duplicated` section still fails.
 
 Configuration: `[tool.cw.changelog_freeze].since_tag` in the repo-root
 `pyproject.toml` (a `vX.Y.Z` tag). Absent table or key means beginning of
@@ -57,13 +61,14 @@ Exit codes:
     1  — at least one violation, or a config/IO/git error (message on stderr,
          nothing on stdout)
 
-Merged-result mode (`--merge-into REF`): tags are not read, so `--require-tags`
-is accepted and ignored; `--changelog` names only the repo-relative path read
-from REF and from the merged tree. Exit 0 also when merge-tree reports a
-conflict or REF has no CHANGELOG (a note on stderr: the host reports such a PR
-conflicting and the conflict machinery owns it). `--warn-on-error` (valid only
-with `--merge-into`) turns a git/config error, including a git that cannot be
-launched, into a stderr warning and exit 0
+Merged-result mode (`--merge-into REF`): tags are read only to forgive a
+section the merge restores to its tag's text (#3540), never required, so
+`--require-tags` is accepted and ignored; `--changelog` names only the
+repo-relative path read from REF and from the merged tree. Exit 0 also when
+merge-tree reports a conflict or REF has no CHANGELOG (a note on stderr: the
+host reports such a PR conflicting and the conflict machinery owns it).
+`--warn-on-error` (valid only with `--merge-into`) turns a git/config error,
+including a git that cannot be launched, into a stderr warning and exit 0
 with nothing on stdout (a `::warning::` annotation under GitHub Actions); it
 never hides a violation. The human summary's last line names the repair,
 `cw worktree changelog-sync --base <REF without origin/>`.
@@ -453,6 +458,57 @@ def check_merge_preserves_released(
     return violations
 
 
+def _tag_section_text(root: Path, rel_path: str, tag: str) -> str | None:
+    """The `## [X.Y.Z]` section as release *tag* captured it; None if unreadable."""
+    result = _git(root, "show", f"{tag}:{rel_path}")
+    if result.returncode != 0:
+        return None
+    version = tag.removeprefix(_TAG_PREFIX)
+    lines = result.stdout.splitlines()
+    matching = [h for h in parse_headings(lines) if h.version == version]
+    if len(matching) != 1:
+        return None
+    return section_text(lines, matching[0].line)
+
+
+def forgive_restorations(
+    root: Path,
+    rel_path: str,
+    merged_lines: list[str],
+    violations: list[Violation],
+) -> list[Violation]:
+    """Drop the Rule 4 `changed` violations that restore a section to its tag (#3540).
+
+    A released section of main that already differs from its release tag (a
+    bullet slipped into it after the cut) breaks Rule 1 on main and on every
+    branch cut from it, and the repair, by design, changes that section, which
+    Rule 4 alone would reject. A `changed` violation is forgiven only when the
+    merged section text equals the text the release's tag captured: the merge
+    moves the section toward the tag and all the way to it. A change away from
+    the tag, a partial restoration, a `removed` or `duplicated` section and a
+    section whose tag or tag copy cannot be read all stay violations.
+    """
+    merged_heads = parse_headings(merged_lines)
+    kept: list[Violation] = []
+    for violation in violations:
+        if (
+            violation.kind == KIND_MERGE
+            and violation.detail == "changed"
+            and parse_tag(violation.tag) is not None
+        ):
+            version = violation.tag.removeprefix(_TAG_PREFIX)
+            found = [h for h in merged_heads if h.version == version]
+            tag_text = _tag_section_text(root, rel_path, violation.tag)
+            if (
+                len(found) == 1
+                and tag_text is not None
+                and section_text(merged_lines, found[0].line) == tag_text
+            ):
+                continue
+        kept.append(violation)
+    return kept
+
+
 def _verify_commit(root: Path, rev: str, what: str) -> None:
     result = _git(root, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}")
     if result.returncode != 0:
@@ -557,8 +613,12 @@ def _evaluate_merge(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 0
-    violations = check_merge_preserves_released(
-        main_text.splitlines(), merged_text.splitlines()
+    merged_lines = merged_text.splitlines()
+    violations = forgive_restorations(
+        root,
+        rel_path,
+        merged_lines,
+        check_merge_preserves_released(main_text.splitlines(), merged_lines),
     )
     payload: dict[str, object] = {
         "ok": not violations,

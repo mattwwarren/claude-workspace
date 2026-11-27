@@ -989,6 +989,158 @@ def test_merge_into_independent_of_tags(
     assert _pairs(payload) == {("v1.1.0", "merge_changes_released_section", "changed")}
 
 
+_TAGGED_1_1_0: Section = ("1.1.0", ["- tagged bullet"])
+_STRAY_1_1_0: Section = ("1.1.0", ["- tagged bullet", "- stray bullet"])
+_MOVED: Section = ("Unreleased", ["- moved bullet"])
+_RELEASED_CHANGED = ("v1.1.0", "merge_changes_released_section", "changed")
+
+
+def _repair_commit(repo: Path, *sections: Section) -> None:
+    _commit(repo, *sections, version="1.1.0", since_tag="v1.1.0")
+
+
+def _drift_repo(
+    make_git_repo: Callable[..., Path], *, drifted: bool
+) -> tuple[Path, str]:
+    """A repo whose main has tag ``v1.1.0``; ``drifted`` adds a stray bullet to it.
+
+    Returns the repo, checked out on a ``repair`` branch cut from main, and
+    main's sha, which the tests pass as ``--merge-into``.
+    """
+    repo = make_git_repo("drift")
+    _commit(
+        repo,
+        UNRELEASED,
+        _TAGGED_1_1_0,
+        version="1.1.0",
+        since_tag="v1.1.0",
+        tag="v1.1.0",
+    )
+    if drifted:
+        _repair_commit(repo, UNRELEASED, _STRAY_1_1_0)
+    main_sha = git_in(repo, "rev-parse", "HEAD")
+    git_in(repo, "checkout", "-q", "-b", "repair")
+    return repo, main_sha
+
+
+def test_merge_into_accepts_a_restoration_to_the_tag_text(
+    mod: types.ModuleType,
+    make_git_repo: Callable[..., Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo, main_sha = _drift_repo(make_git_repo, drifted=True)
+    _repair_commit(repo, _MOVED, _TAGGED_1_1_0)
+
+    code, payload, _ = _merge_run(mod, repo, capsys, ref=main_sha)
+
+    assert code == 0
+    assert payload["ok"] is True
+    assert payload["violations"] == []
+
+
+def test_merge_into_does_not_flag_a_drifted_section_the_merge_leaves_alone(
+    mod: types.ModuleType,
+    make_git_repo: Callable[..., Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo, main_sha = _drift_repo(make_git_repo, drifted=True)
+    _repair_commit(repo, _MOVED, _STRAY_1_1_0)
+
+    code, payload, _ = _merge_run(mod, repo, capsys, ref=main_sha)
+
+    # Rule 4 compares main with the merge; the drift against the tag is Rule 1's.
+    assert code == 0
+    assert payload["violations"] == []
+
+
+@pytest.mark.parametrize(
+    ("label", "section"),
+    [
+        (
+            "further away from the tag",
+            ("1.1.0", ["- tagged bullet", "- stray bullet", "- another stray"]),
+        ),
+        ("partial restoration, a third text", ("1.1.0", ["- different bullet"])),
+    ],
+)
+def test_merge_into_still_flags_a_change_that_does_not_end_at_the_tag_text(
+    mod: types.ModuleType,
+    make_git_repo: Callable[..., Path],
+    capsys: pytest.CaptureFixture[str],
+    label: str,
+    section: Section,
+) -> None:
+    repo, main_sha = _drift_repo(make_git_repo, drifted=True)
+    _repair_commit(repo, _MOVED, section)
+
+    code, payload, _ = _merge_run(mod, repo, capsys, ref=main_sha)
+
+    assert code == 1, label
+    assert _pairs(payload) == {_RELEASED_CHANGED}
+
+
+def test_merge_into_still_flags_a_change_to_a_section_that_matches_its_tag(
+    mod: types.ModuleType,
+    make_git_repo: Callable[..., Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo, main_sha = _drift_repo(make_git_repo, drifted=False)
+    _repair_commit(repo, UNRELEASED, _STRAY_1_1_0)
+
+    code, payload, _ = _merge_run(mod, repo, capsys, ref=main_sha)
+
+    assert code == 1
+    assert _pairs(payload) == {_RELEASED_CHANGED}
+
+
+def test_merge_into_never_forgives_a_removed_released_section(
+    mod: types.ModuleType,
+    make_git_repo: Callable[..., Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo, main_sha = _drift_repo(make_git_repo, drifted=True)
+    _repair_commit(repo, ("Unreleased", ["- everything moved"]))
+
+    code, payload, _ = _merge_run(mod, repo, capsys, ref=main_sha)
+
+    assert code == 1
+    assert _pairs(payload) == {("v1.1.0", "merge_changes_released_section", "removed")}
+
+
+def test_merge_into_fails_closed_when_the_release_tag_is_not_readable(
+    mod: types.ModuleType,
+    make_git_repo: Callable[..., Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo, main_sha = _drift_repo(make_git_repo, drifted=True)
+    _repair_commit(repo, _MOVED, _TAGGED_1_1_0)
+    git_in(repo, "tag", "-d", "v1.1.0")
+
+    code, payload, _ = _merge_run(mod, repo, capsys, ref=main_sha)
+
+    assert code == 1
+    assert _pairs(payload) == {_RELEASED_CHANGED}
+
+
+def test_merge_into_fails_closed_when_the_tag_copy_lacks_the_section(
+    mod: types.ModuleType,
+    make_git_repo: Callable[..., Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo, main_sha = _drift_repo(make_git_repo, drifted=True)
+    _repair_commit(repo, _MOVED, _TAGGED_1_1_0)
+    # Re-point the release tag at a commit whose CHANGELOG has no [1.1.0] section.
+    git_in(repo, "checkout", "-q", "--orphan", "bare")
+    _repair_commit(repo, UNRELEASED)
+    git_in(repo, "tag", "-f", "v1.1.0")
+    git_in(repo, "checkout", "-q", "repair")
+
+    code, payload, _ = _merge_run(mod, repo, capsys, ref=main_sha)
+
+    assert code == 1
+    assert _pairs(payload) == {_RELEASED_CHANGED}
+
+
 def test_changelog_flag_names_the_path(
     mod: types.ModuleType,
     make_git_repo: Callable[..., Path],
