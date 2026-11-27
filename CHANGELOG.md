@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.114.0] - 2026-11-27
+
 ### Added
 
 - **Opt-in preconditions for adopted scope-drift grants (#3917).** Pass `--expected-head` and `--expected-park` together to `cw dev-queue approve --scope-drift`. The guarded operation checks the live PR head, parked scope request, and committed blocking confirmation evidence before granting and requeueing. Read `scope_decision.park_token` from `cw dev-queue show --json`; it is absent if the park is not eligible. Existing unguarded operator grants and review approval gates are unchanged.
