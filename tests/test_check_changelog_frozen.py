@@ -1060,7 +1060,7 @@ def test_merge_into_does_not_flag_a_drifted_section_the_merge_leaves_alone(
             "further away from the tag",
             ("1.1.0", ["- tagged bullet", "- stray bullet", "- another stray"]),
         ),
-        ("partial restoration, a third text", ("1.1.0", ["- different bullet"])),
+        ("a third text unrelated to the tag", ("1.1.0", ["- different bullet"])),
     ],
 )
 def test_merge_into_still_flags_a_change_that_does_not_end_at_the_tag_text(
@@ -1116,10 +1116,19 @@ def test_merge_into_fails_closed_when_the_release_tag_is_not_readable(
     _repair_commit(repo, _MOVED, _TAGGED_1_1_0)
     git_in(repo, "tag", "-d", "v1.1.0")
 
-    code, payload, _ = _merge_run(mod, repo, capsys, ref=main_sha)
+    code, payload, err = _merge_run(mod, repo, capsys, ref=main_sha)
 
     assert code == 1
     assert _pairs(payload) == {_RELEASED_CHANGED}
+    assert "git fetch --tags" in err
+
+
+def _repoint_tag_at(repo: Path, *sections: Section) -> None:
+    """Re-point ``v1.1.0`` at an orphan commit whose CHANGELOG holds *sections*."""
+    git_in(repo, "checkout", "-q", "--orphan", "bare")
+    _repair_commit(repo, *sections)
+    git_in(repo, "tag", "-f", "v1.1.0")
+    git_in(repo, "checkout", "-q", "repair")
 
 
 def test_merge_into_fails_closed_when_the_tag_copy_lacks_the_section(
@@ -1129,16 +1138,108 @@ def test_merge_into_fails_closed_when_the_tag_copy_lacks_the_section(
 ) -> None:
     repo, main_sha = _drift_repo(make_git_repo, drifted=True)
     _repair_commit(repo, _MOVED, _TAGGED_1_1_0)
-    # Re-point the release tag at a commit whose CHANGELOG has no [1.1.0] section.
-    git_in(repo, "checkout", "-q", "--orphan", "bare")
-    _repair_commit(repo, UNRELEASED)
-    git_in(repo, "tag", "-f", "v1.1.0")
-    git_in(repo, "checkout", "-q", "repair")
+    _repoint_tag_at(repo, UNRELEASED)
+
+    code, payload, err = _merge_run(mod, repo, capsys, ref=main_sha)
+
+    assert code == 1
+    assert _pairs(payload) == {_RELEASED_CHANGED}
+    assert "git fetch --tags" in err
+
+
+def test_merge_into_fails_closed_when_the_tag_copy_repeats_the_section(
+    mod: types.ModuleType,
+    make_git_repo: Callable[..., Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo, main_sha = _drift_repo(make_git_repo, drifted=True)
+    _repair_commit(repo, _MOVED, _TAGGED_1_1_0)
+    # The first copy equals the merged text; an ambiguous tag copy must not pass.
+    _repoint_tag_at(repo, UNRELEASED, _TAGGED_1_1_0, _TAGGED_1_1_0)
 
     code, payload, _ = _merge_run(mod, repo, capsys, ref=main_sha)
 
     assert code == 1
     assert _pairs(payload) == {_RELEASED_CHANGED}
+
+
+def test_merge_into_never_forgives_a_duplicated_released_section(
+    mod: types.ModuleType,
+    make_git_repo: Callable[..., Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo, main_sha = _drift_repo(make_git_repo, drifted=True)
+    _repair_commit(repo, _MOVED, _TAGGED_1_1_0, _TAGGED_1_1_0)
+
+    code, payload, _ = _merge_run(mod, repo, capsys, ref=main_sha)
+
+    assert code == 1
+    assert _pairs(payload) == {
+        ("v1.1.0", "merge_changes_released_section", "duplicated")
+    }
+
+
+def test_merge_into_forgives_each_section_against_its_own_tag(
+    mod: types.ModuleType,
+    make_git_repo: Callable[..., Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo = make_git_repo("two-sections")
+    older: Section = ("1.1.0", ["- older tagged"])
+    newer: Section = ("1.2.0", ["- newer tagged"])
+    _commit(repo, UNRELEASED, older, version="1.1.0", since_tag="v1.1.0", tag="v1.1.0")
+    _commit(
+        repo,
+        UNRELEASED,
+        newer,
+        older,
+        version="1.2.0",
+        since_tag="v1.1.0",
+        tag="v1.2.0",
+    )
+    _commit(
+        repo,
+        UNRELEASED,
+        ("1.2.0", [*newer[1], "- newer stray"]),
+        ("1.1.0", [*older[1], "- older stray"]),
+        version="1.2.0",
+        since_tag="v1.1.0",
+    )
+    main_sha = git_in(repo, "rev-parse", "HEAD")
+    git_in(repo, "checkout", "-q", "-b", "repair")
+    # Restore 1.1.0 to its tag and push 1.2.0 further from its own.
+    _commit(
+        repo,
+        UNRELEASED,
+        ("1.2.0", [*newer[1], "- newer stray", "- newer more"]),
+        older,
+        version="1.2.0",
+        since_tag="v1.1.0",
+    )
+
+    code, payload, _ = _merge_run(mod, repo, capsys, ref=main_sha)
+
+    assert code == 1
+    assert _pairs(payload) == {("v1.2.0", "merge_changes_released_section", "changed")}
+
+
+def test_merge_into_does_not_read_a_ref_named_like_a_non_release_heading(
+    mod: types.ModuleType,
+    make_git_repo: Callable[..., Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo = make_git_repo("legacy")
+    _commit(repo, UNRELEASED, ("legacy", ["- old"]), version="1.1.0")
+    main_sha = git_in(repo, "rev-parse", "HEAD")
+    git_in(repo, "checkout", "-q", "-b", "repair")
+    _commit(repo, UNRELEASED, ("legacy", ["- new"]), version="1.1.0")
+    # A branch named like the heading holds the merged text; it is not a release tag.
+    git_in(repo, "branch", "legacy")
+
+    code, payload, _ = _merge_run(mod, repo, capsys, ref=main_sha)
+
+    assert code == 1
+    assert _pairs(payload) == {("legacy", "merge_changes_released_section", "changed")}
 
 
 def test_changelog_flag_names_the_path(

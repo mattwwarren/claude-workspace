@@ -18,7 +18,12 @@ from pathlib import Path
 import pytest
 
 from cw.changelog_sync import sync_changelog
-from tests._changelog_cut_helpers import ReleaseMovedRepo, cut_straddle_repo
+from tests._changelog_cut_helpers import (
+    CL_MAIN,
+    ReleaseMovedRepo,
+    commit_files,
+    cut_straddle_repo,
+)
 from tests._shared.cli_preflight import _write_project_config_yaml
 from tests._shared.git_repos import git_in
 from tests._tool_fakes import (
@@ -2752,6 +2757,57 @@ def test_arm_automerge_arms_once_the_changelog_is_synced(
     merge = [*_MERGE[:-1], synced.head_sha]
     assert_gh_calls(fake_bin, [_VIEW, _BASE_VIEW, merge, _VIEW])
     assert "WARNING" not in result.stderr
+
+
+def _repair_head(cut_clone: ReleaseMovedRepo, repair_changelog: str) -> str:
+    """Land a stray bullet in released 1.1.0 on origin/main; return a repair head.
+
+    The head is a local commit on top of the drifted main whose CHANGELOG is
+    *repair_changelog*, so ``--merge-into origin/main`` merges it cleanly.
+    """
+    clone = cut_clone.clone
+    drifted = CL_MAIN.replace(
+        "- Beta fix (#2).\n", "- Beta fix (#2).\n- Stray (#9).\n", 1
+    )
+    git_in(clone, "checkout", "-q", "-b", "drift", cut_clone.main_sha)
+    commit_files(clone, {"CHANGELOG.md": drifted}, "stray bullet in a released section")
+    git_in(clone, "push", "origin", "HEAD:main")
+    return commit_files(clone, {"CHANGELOG.md": repair_changelog}, "repair")
+
+
+def test_arm_automerge_arms_a_pr_that_restores_a_released_section_to_its_tag(
+    tmp_path: Path, cut_clone: ReleaseMovedRepo
+) -> None:
+    head = _repair_head(cut_clone, CL_MAIN)
+    fake_bin = stub_gh_arm(
+        tmp_path, [(0, "", ARM_VIEW_ARMED)], initial_view=_VIEW_WITH_BASE
+    )
+
+    result = _run_arm(cut_clone.clone, fake_bin, head_sha=head)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["status"] == "armed"
+    merge = [*_MERGE[:-1], head]
+    assert_gh_calls(fake_bin, [_VIEW, _BASE_VIEW, merge, _VIEW])
+    assert "WARNING" not in result.stderr
+
+
+def test_arm_automerge_still_refuses_a_change_away_from_the_tag(
+    tmp_path: Path, cut_clone: ReleaseMovedRepo
+) -> None:
+    away = CL_MAIN.replace(
+        "- Beta fix (#2).\n", "- Beta fix (#2).\n- Another (#8).\n", 1
+    )
+    head = _repair_head(cut_clone, away)
+    fake_bin = stub_gh_arm(
+        tmp_path, [(0, "", ARM_VIEW_ARMED)], initial_view=_VIEW_WITH_BASE
+    )
+
+    result = _run_arm(cut_clone.clone, fake_bin, head_sha=head)
+
+    assert result.returncode == 1, result.stderr
+    assert _merge_count(fake_bin) == 0
+    assert json.loads(result.stdout)["gh_stderr"].startswith("changelog_merge_freeze:")
 
 
 def test_arm_automerge_fetch_failure_warns_and_arms(

@@ -157,7 +157,7 @@ A PR that was green before a release cut can merge after it with its `CHANGELOG.
 
 If a PR slips through, `main` fails `check_changelog_frozen` (`[section_changed] vX.Y.Z`): move the hunk back under `[Unreleased]` in a PR, as #3279 did. Closing the window needs `strict_required_status_checks_policy` on ruleset `main-merge`, an admin settings change that is not part of this fix.
 
-That repair PR merges through the normal path, with no admin bypass (#3540). Layer B and Layer C accept a change to a released section only when the merged section text equals the text its release tag captured, so a PR that restores the section to the tag passes and arms. They still reject a change away from the tag, a partial restoration, a removed or duplicated section, and a section whose tag cannot be read. The ruleset `main-merge` has no bypass actors, so before this change a repair PR could not be merged at all without editing the ruleset.
+That repair PR merges through the normal path, with no admin bypass (#3540). Layer B and Layer C accept a change to a released section only when the merged section text equals the text its release tag captured, so a PR that restores the section to the tag passes and arms. They still reject a change away from the tag, a partial restoration, a removed or duplicated section, and a section whose tag cannot be read. The ruleset `main-merge` has no bypass actors, so before this change a repair PR could not be merged at all without editing the ruleset. `cw worktree changelog-sync` stays strict: it refuses any change to a released section, so do not run it on a repair PR. A restoring PR never triggers it, because it no longer causes a freeze refusal.
 
 ### Commit-subject contract
 

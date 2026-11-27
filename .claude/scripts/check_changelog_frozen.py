@@ -104,6 +104,9 @@ KIND_CHANGED = "section_changed"
 KIND_OUTSIDE = "entry_outside_unreleased"
 KIND_DUPLICATE = "duplicate_heading"
 KIND_MERGE = "merge_changes_released_section"
+DETAIL_REMOVED = "removed"
+DETAIL_DUPLICATED = "duplicated"
+DETAIL_CHANGED = "changed"
 MODE_MERGE_INTO = "merge_into"
 
 _PREFIX = "check_changelog_frozen"
@@ -445,13 +448,13 @@ def check_merge_preserves_released(
         seen.add(heading.version)
         found = [h for h in merged_heads if h.version == heading.version]
         if not found:
-            detail = "removed"
+            detail = DETAIL_REMOVED
         elif len(found) > 1:
-            detail = "duplicated"
+            detail = DETAIL_DUPLICATED
         elif section_text(main_lines, heading.line) != section_text(
             merged_lines, found[0].line
         ):
-            detail = "changed"
+            detail = DETAIL_CHANGED
         else:
             continue
         violations.append(Violation(label_for(heading.version), KIND_MERGE, detail))
@@ -493,15 +496,21 @@ def forgive_restorations(
     for violation in violations:
         if (
             violation.kind == KIND_MERGE
-            and violation.detail == "changed"
+            and violation.detail == DETAIL_CHANGED
             and parse_tag(violation.tag) is not None
         ):
             version = violation.tag.removeprefix(_TAG_PREFIX)
             found = [h for h in merged_heads if h.version == version]
             tag_text = _tag_section_text(root, rel_path, violation.tag)
-            if (
+            if tag_text is None:
+                print(
+                    f"note: {violation.tag} restoration not evaluated: its release "
+                    "tag or the section in the tag's CHANGELOG is unreadable "
+                    "(run `git fetch --tags`)",
+                    file=sys.stderr,
+                )
+            elif (
                 len(found) == 1
-                and tag_text is not None
                 and section_text(merged_lines, found[0].line) == tag_text
             ):
                 continue
@@ -614,12 +623,8 @@ def _evaluate_merge(args: argparse.Namespace) -> int:
         )
         return 0
     merged_lines = merged_text.splitlines()
-    violations = forgive_restorations(
-        root,
-        rel_path,
-        merged_lines,
-        check_merge_preserves_released(main_text.splitlines(), merged_lines),
-    )
+    violations = check_merge_preserves_released(main_text.splitlines(), merged_lines)
+    violations = forgive_restorations(root, rel_path, merged_lines, violations)
     payload: dict[str, object] = {
         "ok": not violations,
         "mode": MODE_MERGE_INTO,
