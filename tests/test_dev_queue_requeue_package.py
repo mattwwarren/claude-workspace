@@ -81,6 +81,14 @@ _SURFACE = {
     "_refuse_if_live_session",
 }
 
+# Names with no ``__module__`` of their own (a ``Literal`` alias and two strings):
+# ownership is namespace membership only.
+_NO_MODULE_ATTR = {
+    "RequeueRefusalTag",
+    "_REASON_SKIPPED_LIVE_SESSION",
+    "_REASON_SKIPPED_ROSTER_UNREADABLE",
+}
+
 # The names ``cw.dev_queue`` re-exports from the requeue package (its __init__).
 _CW_DEV_QUEUE_NAMES = (
     "_apply_requeue_stage",
@@ -157,8 +165,15 @@ def test_package_name_is_owner_object(name: str) -> None:
 
 
 @pytest.mark.parametrize("name", sorted(_OWNER))
-def test_owner_defines_the_object(name: str) -> None:
+def test_owner_binds_the_name(name: str) -> None:
     assert name in vars(_sub(_OWNER[name]))
+
+
+@pytest.mark.parametrize("name", sorted(set(_OWNER) - _NO_MODULE_ATTR))
+def test_owner_defines_the_object(name: str) -> None:
+    """An importer binds the name too; only the owner is its ``__module__``."""
+    obj = vars(_sub(_OWNER[name]))[name]
+    assert obj.__module__ == f"{_PKG}.{_OWNER[name]}"
 
 
 @pytest.mark.parametrize("name", _CW_DEV_QUEUE_NAMES)
@@ -187,12 +202,9 @@ def test_init_is_a_pure_reexport() -> None:
     tree = ast.parse((_PKG_DIR / "__init__.py").read_text())
     for node in tree.body:
         assert not isinstance(node, (ast.ClassDef, ast.FunctionDef)), node
-    bound: set[str] = set()
-    for node in tree.body:
-        if isinstance(node, ast.ImportFrom):
-            bound |= {a.asname or a.name for a in node.names}
-    allowed = set(_OWNER) | set(_SUBMODULES) | {"annotations", "__all__"}
-    assert bound <= allowed, bound - allowed
+    bound = {name for name in vars(cw.dev_queue.requeue) if not name.startswith("__")}
+    # ``annotations`` is the ``from __future__ import annotations`` binding.
+    assert bound == _SURFACE | set(_SUBMODULES) | {"annotations"}
 
 
 def test_sibling_edges_are_exactly_the_dag() -> None:

@@ -136,14 +136,9 @@ def test_init_is_a_pure_reexport() -> None:
     tree = ast.parse((_PKG_DIR / "__init__.py").read_text())
     for node in tree.body:
         assert not isinstance(node, (ast.ClassDef, ast.FunctionDef)), node
-    bound: set[str] = set()
-    for node in tree.body:
-        if isinstance(node, ast.ImportFrom):
-            bound |= {a.asname or a.name for a in node.names}
-        elif isinstance(node, ast.Assign):
-            bound |= {t.id for t in node.targets if isinstance(t, ast.Name)}
-    allowed = set(_OWNER) | set(_SUBMODULES) | {"annotations", "__all__"}
-    assert bound <= allowed, bound - allowed
+    bound = {name for name in vars(cw.models.enums) if not name.startswith("__")}
+    # ``annotations`` is the ``from __future__ import annotations`` binding.
+    assert bound == set(_OWNER) | set(_SUBMODULES) | {"annotations"}
 
 
 def test_submodules_are_dag_roots() -> None:
