@@ -269,6 +269,13 @@ onto source modules (`test_cli.py` ↔ `cli.py`, `test_native_daemon.py` ↔
   Run a test that drives `cw review adjudicate` from `tmp_path`, never the
   repo root. Opt out with `@pytest.mark.real_cw_write_allowed` (justify it);
   `integration` tests are exempt. Subprocess children are not seen.
+- Dispatch context isolation (#3952): every non-integration unit test starts
+  in a headless-shaped cwd (`tmp_path/_dispatch_cwd`), not the repo root, and
+  the Python context walk is confined to the basetemp. A test that needs a
+  non-worker cwd does `monkeypatch.chdir(tmp_path)`. Read repo files through
+  `_REPO_ROOT`, never relative paths. Limit: a refusal test that asserts only
+  `exit_code != 0` passes vacuously; assert the message. Logic:
+  `tests/_cw_context_isolation.py`.
 
 ## Key Patterns
 
